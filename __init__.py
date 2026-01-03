@@ -40,17 +40,32 @@ class CURVELOOPTOOLS_PT_main(bpy.types.Panel):
         # row.operator("curve_looptools.loft", text="Loft") # Not impl
         col.separator()
         row = col.row(align=True)
-        row.operator("curve_looptools.relax", text="Relax").relax_position = True
+        op_relax = row.operator("curve_looptools.relax", text="Relax")
+        op_relax.relax_position = True
+        op_relax.relax_tilt = False
+        op_relax.relax_radius = False
+        op_relax.lock_length = True
+        op_relax.lock_tilt = False
+        op_relax.lock_radius = False
+
         row.operator("curve_looptools.space", text="Space")
         
         row = col.row(align=True)
         op_tilt = row.operator("curve_looptools.relax", text="Relax Tilt")
         op_tilt.relax_position = False
         op_tilt.relax_tilt = True
+        op_tilt.relax_radius = False
+        op_tilt.lock_length = False
+        op_tilt.lock_tilt = True
+        op_tilt.lock_radius = False
         
         op_radius = row.operator("curve_looptools.relax", text="Relax Radius")
         op_radius.relax_position = False
         op_radius.relax_radius = True
+        op_radius.relax_tilt = False
+        op_radius.lock_length = False
+        op_radius.lock_tilt = False
+        op_radius.lock_radius = True
 
 class CURVELOOPTOOLS_MT_menu(bpy.types.Menu):
     bl_label = "LoopTools"
@@ -70,18 +85,24 @@ class CURVELOOPTOOLS_MT_menu(bpy.types.Menu):
         op_relax.relax_position = True
         op_relax.relax_tilt = False
         op_relax.relax_radius = False
-        op_relax.lock_length = True
+        op_relax.lock_length = True # Default behavior?
+        op_relax.lock_tilt = False
+        op_relax.lock_radius = False
         
         op_tilt = layout.operator("curve_looptools.relax", text="Relax Tilt")
         op_tilt.relax_position = False
         op_tilt.relax_tilt = True
         op_tilt.relax_radius = False
+        op_tilt.lock_length = False
         op_tilt.lock_tilt = True
+        op_tilt.lock_radius = False
 
         op_radius = layout.operator("curve_looptools.relax", text="Relax Radius")
         op_radius.relax_position = False
         op_radius.relax_radius = True
         op_radius.relax_tilt = False
+        op_radius.lock_length = False
+        op_radius.lock_tilt = False
         op_radius.lock_radius = True
         
         layout.operator("curve_looptools.space", text="Space")
