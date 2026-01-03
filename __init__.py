@@ -26,17 +26,18 @@ class CURVELOOPTOOLS_PT_main(bpy.types.Panel):
         col = layout.column(align=True)
         col.label(text="Tools")
         
-        row = col.row(align=True)
-        row.operator("curve_looptools.bridge", text="Bridge") # Not impl
-        row.operator("curve_looptools.circle", text="Circle") # Not impl
+        # row = col.row(align=True)
+        # row.operator("curve_looptools.bridge", text="Bridge") # Not impl
+        # row.operator("curve_looptools.circle", text="Circle") # Impl
         
         row = col.row(align=True)
-        row.operator("curve_looptools.curve", text="Curve") # Not impl
+        # row.operator("curve_looptools.curve", text="Curve") # Not impl
         row.operator("curve_looptools.flatten", text="Flatten")
+        row.operator("curve_looptools.circle", text="Circle")
         
-        row = col.row(align=True)
-        row.operator("curve_looptools.gstretch", text="Gstretch") # Not impl
-        row.operator("curve_looptools.loft", text="Loft") # Not impl
+        # row = col.row(align=True)
+        # row.operator("curve_looptools.gstretch", text="Gstretch") # Not impl
+        # row.operator("curve_looptools.loft", text="Loft") # Not impl
         col.separator()
         row = col.row(align=True)
         row.operator("curve_looptools.relax", text="Relax").relax_position = True
@@ -57,29 +58,31 @@ class CURVELOOPTOOLS_MT_menu(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
-        layout.operator("curve_looptools.bridge", text="Bridge")
+        # layout.operator("curve_looptools.bridge", text="Bridge")
         layout.operator("curve_looptools.circle", text="Circle")
-        layout.operator("curve_looptools.curve", text="Curve")
+        # layout.operator("curve_looptools.curve", text="Curve")
         layout.operator("curve_looptools.flatten", text="Flatten")
-        layout.operator("curve_looptools.gstretch", text="Gstretch")
-        layout.operator("curve_looptools.gstretch", text="Gstretch")
-        layout.operator("curve_looptools.loft", text="Loft")
+        # layout.operator("curve_looptools.gstretch", text="Gstretch")
+        # layout.operator("curve_looptools.loft", text="Loft")
         layout.separator()
         
         op_relax = layout.operator("curve_looptools.relax", text="Relax")
         op_relax.relax_position = True
         op_relax.relax_tilt = False
         op_relax.relax_radius = False
+        op_relax.lock_length = True
         
         op_tilt = layout.operator("curve_looptools.relax", text="Relax Tilt")
         op_tilt.relax_position = False
         op_tilt.relax_tilt = True
         op_tilt.relax_radius = False
+        op_tilt.lock_tilt = True
 
         op_radius = layout.operator("curve_looptools.relax", text="Relax Radius")
         op_radius.relax_position = False
         op_radius.relax_radius = True
         op_radius.relax_tilt = False
+        op_radius.lock_radius = True
         
         layout.operator("curve_looptools.space", text="Space")
 

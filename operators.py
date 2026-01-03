@@ -351,6 +351,9 @@ class CurveLoopTools_OT_relax(bpy.types.Operator):
     relax_position: bpy.props.BoolProperty(name="Position", default=True)
     relax_tilt: bpy.props.BoolProperty(name="Tilt", default=False)
     relax_radius: bpy.props.BoolProperty(name="Radius", default=False)
+    lock_radius: bpy.props.BoolProperty(name="Lock Radius", default=False, description="Preserve original radius volume")
+    lock_tilt: bpy.props.BoolProperty(name="Lock Tilt", default=False, description="Preserve original total tilt")
+    lock_length: bpy.props.BoolProperty(name="Lock Length", default=False, description="Preserve original curve length")
 
     @classmethod
     def poll(cls, context):
@@ -364,13 +367,51 @@ class CurveLoopTools_OT_relax(bpy.types.Operator):
             # Calculate new positions/attributes for all segments
             updates = []
             
+            # Tracking for Locks
+            affected_radius_bp = []
+            initial_radius_sum = 0.0
+            
+            affected_tilt_bp = []
+            initial_tilt_sum = 0.0
+            
+            # For length, we need to track per segment because they are independent chains
+            # Map segment_index -> { 'initial_len', 'points_bp' }
+            seg_length_data = {} 
+
+            # 1. Pre-calculate Sums/Lengths
+            for s_idx, seg in enumerate(segments):
+                # Lock Radius
+                if self.relax_radius and self.lock_radius:
+                    for i, (spline, idx, bp) in enumerate(seg):
+                        affected_radius_bp.append(bp)
+                        initial_radius_sum += bp.radius
+                
+                # Lock Tilt
+                if self.relax_tilt and self.lock_tilt:
+                    for i, (spline, idx, bp) in enumerate(seg):
+                         if hasattr(bp, 'tilt'):
+                            affected_tilt_bp.append(bp)
+                            initial_tilt_sum += bp.tilt
+                            
+                # Lock Length
+                if self.relax_position and self.lock_length:
+                    # Calculate total chord length of this segment
+                    current_len = 0.0
+                    pts = [item[2] for item in seg]
+                    # We need ordered coordinates.
+                    # 'seg' is ordered list from contiguous segments function
+                    coords = [p.co.to_3d() for p in pts]
+                    for k in range(len(coords)-1):
+                        current_len += (coords[k+1] - coords[k]).length
+                    
+                    seg_length_data[s_idx] = {'initial': current_len, 'pts': pts}
+
+            # 2. Calculate Updates (Relaxation)
             for seg in segments:
                 s = seg[0][0]
                 total_pts = len(s.bezier_points) if s.type == 'BEZIER' else len(s.points)
-                indices = [item[1] for item in seg]
                 
                 for i, (spline, idx, bp) in enumerate(seg):
-                    # Find prev and next indices
                     prev_idx = idx - 1
                     next_idx = idx + 1
                     
@@ -378,11 +419,9 @@ class CurveLoopTools_OT_relax(bpy.types.Operator):
                         prev_idx %= total_pts
                         next_idx %= total_pts
                     else:
-                        # Clamp
                         if prev_idx < 0: prev_idx = 0 
                         if next_idx >= total_pts: next_idx = total_pts - 1
                     
-                    # If clamped and same, no move (endpoint)
                     if (prev_idx == idx or next_idx == idx) and not spline.use_cyclic_u:
                         continue
 
@@ -425,28 +464,99 @@ class CurveLoopTools_OT_relax(bpy.types.Operator):
                     if update_data:
                         updates.append((bp, update_data, spline))
 
-            # Apply
+            # 3. Apply Updates
             for bp, data, spline in updates:
                 if 'pos' in data:
                     target = data['pos']
                     current = bp.co.to_3d()
-                    new_pos = current.lerp(target, 0.5) # 0.5 factor for smoothing
-                    
+                    new_pos = current.lerp(target, 0.5)
                     if isinstance(bp, bpy.types.BezierSplinePoint):
                         utils.move_bezier_point(bp, new_pos)
                     else:
-                        if len(bp.co)==4:
-                            bp.co = new_pos.to_4d()
-                        else:
-                            bp.co = new_pos
+                        if len(bp.co)==4: bp.co = new_pos.to_4d()
+                        else: bp.co = new_pos
                 
                 if 'tilt' in data and hasattr(bp, 'tilt'):
-                    # Smooth tilt
                     bp.tilt = bp.tilt * 0.5 + data['tilt'] * 0.5
                     
                 if 'radius' in data:
-                    # Smooth radius
                     bp.radius = bp.radius * 0.5 + data['radius'] * 0.5
+            
+            # 4. Restore Locks
+            
+            # Lock Radius
+            if self.relax_radius and self.lock_radius and affected_radius_bp and initial_radius_sum > 0:
+                new_sum = sum([bp.radius for bp in affected_radius_bp])
+                if new_sum > 1e-6:
+                    factor = initial_radius_sum / new_sum
+                    for bp in affected_radius_bp:
+                        bp.radius *= factor
+            
+            # Lock Tilt
+            if self.relax_tilt and self.lock_tilt and affected_tilt_bp and initial_tilt_sum != 0:
+                 # Tilt can be negative or zero sum? 
+                 # If sum is 0, we can't scale.
+                 # Usually tilt is around 0? No, usually 0 is flat.
+                 # Let's try simple scaling. If sum is tiny, skip to avoid explosion.
+                 new_sum = sum([bp.tilt for bp in affected_tilt_bp])
+                 if abs(new_sum) > 1e-6:
+                     factor = initial_tilt_sum / new_sum
+                     for bp in affected_tilt_bp:
+                         bp.tilt *= factor
+                         
+            # Lock Length (Separately per segment)
+            if self.relax_position and self.lock_length:
+                for s_idx, info in seg_length_data.items():
+                    target_len = info['initial']
+                    pts = info['pts']
+                    if len(pts) < 2 or target_len < 1e-6: continue
+                    
+                    # Current smoothed coords
+                    coords = [p.co.to_3d() for p in pts]
+                    new_len = 0.0
+                    for k in range(len(coords)-1):
+                        new_len += (coords[k+1] - coords[k]).length
+                    
+                    if new_len > 1e-6:
+                        factor = target_len / new_len
+                        # Scale segments?
+                        # Simple approach: Rebuild chain from start point (pts[0])
+                        # P_next = P_curr + (Dir * (old_len * factor)) ??
+                        # Wait, (old_len * factor) is just new_len * factor = target_len ... no
+                        # We want the DISTANCE between points to scale up.
+                        
+                        # BUT, simply scaling vector (P_i+1 - P_i) by factor restores total length
+                        # but preserves the new smoothed direction!
+                        
+                        start_co = coords[0]
+                        current_trace = start_co
+                        
+                        # We apply from start to end (propagating)
+                        # Caution: if it's cyclic, this might break the loop closure?
+                        # 'get_contiguous_segments' handles cyclic by potentially returning full loop (duplicate start/end?)
+                        # If duplicate start/end, we should handle carefully.
+                        # Assuming linear chain for now.
+                        
+                        for k in range(len(coords)-1):
+                            vec = coords[k+1] - coords[k]
+                            vec_len = vec.length
+                            # Scale vector
+                            new_vec = vec * factor
+                            
+                            # Next point
+                            next_pos = current_trace + new_vec
+                            
+                            # Apply to pts[k+1]
+                            # pts[0] stays fixed.
+                            
+                            bp = pts[k+1]
+                            if isinstance(bp, bpy.types.BezierSplinePoint):
+                                utils.move_bezier_point(bp, next_pos)
+                            else:
+                                if len(bp.co)==4: bp.co = next_pos.to_4d()
+                                else: bp.co = next_pos
+                                
+                            current_trace = next_pos
 
         return {'FINISHED'}
 
