@@ -112,12 +112,10 @@ def menu_func(self, context):
 
 def register():
     operators.register()
-    bpy.utils.register_class(CURVELOOPTOOLS_PT_main)
     bpy.utils.register_class(CURVELOOPTOOLS_MT_menu)
     bpy.types.VIEW3D_MT_edit_curve_context_menu.prepend(menu_func)
 
 def unregister():
     bpy.types.VIEW3D_MT_edit_curve_context_menu.remove(menu_func)
     bpy.utils.unregister_class(CURVELOOPTOOLS_MT_menu)
-    bpy.utils.unregister_class(CURVELOOPTOOLS_PT_main)
     operators.unregister()
