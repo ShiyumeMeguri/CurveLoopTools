@@ -282,11 +282,74 @@ def get_data_from_index(points, index, attributes):
         data.append(p.radius)
     return data
 
-def relax_calculate_verts(interpolation, tknots, knots, tpoints, points_indices, splines):
-    """
-    Interpolates new values for 'points' based on splines.
-    Returns list of tuples: (index, [new_values])
-    """
+def space_calculate_t(points_co):
+    # Calculate cumulative length t for input points
+    tknots = []
+    loc_prev = None
+    len_total = 0
+    for loc in points_co:
+        if loc_prev is None:
+            loc_prev = loc
+        len_total += (loc - loc_prev).length
+        tknots.append(len_total)
+        loc_prev = loc
+    
+    # Generate evenly spaced targets
+    algorithm = 'regular' # forced for Space
+    amount = len(points_co)
+    if amount < 2:
+        return tknots, tknots
+        
+    t_per_segment = len_total / (amount - 1)
+    tpoints = [i * t_per_segment for i in range(amount)]
+    
+    return tknots, tpoints
+
+def space_calculate_verts(interpolation, tknots, tpoints, splines):
+    # Interpolate at tpoints using splines defined by tknots
+    moves = []
+    
+    # We have one spline list for the whole segment (since tknots defines one continuous line)
+    # splines is list of segment_splines.
+    # spline segment n covers tknots[n] to tknots[n+1]
+    
+    for i, m in enumerate(tpoints):
+        # Find segment n
+        n = -1
+        # Check intervals
+        for k_idx in range(len(tknots)-1):
+            if tknots[k_idx] <= m <= tknots[k_idx+1]:
+                n = k_idx
+                break
+        
+        # Clamp/Precision handling
+        if n == -1:
+            if m <= tknots[0]: n = 0
+            elif m >= tknots[-1]: n = len(tknots) - 2
+        
+        if n >= len(splines): n = len(splines) - 1
+        
+        # Evaluate
+        new_vals = []
+        if interpolation == 'cubic':
+            dims = splines[n]
+            for d_idx in range(len(dims)):
+                a, b, c, d_coeff, tx = dims[d_idx]
+                dt = m - tx
+                val = a + b*dt + c*(dt**2) + d_coeff*(dt**3)
+                new_vals.append(val)
+        else: # linear
+            dims = splines[n]
+            for d_idx in range(len(dims)):
+                a, d_val, t, u = dims[d_idx]
+                if u == 0: u = 1e-8
+                val = ((m - t) / u) * d_val + a
+                new_vals.append(val)
+        
+        moves.append((i, new_vals))
+        
+    return moves
+
     moves = []
     
     # Iterate over the two passes (or 1)
@@ -532,11 +595,135 @@ class CurveCircle(Operator):
 class CurveSpace(Operator):
     bl_idname = "curve_looptools.space"
     bl_label = "Space"
-    bl_description = "Space points evenly (Not Implemented yet)"
+    bl_description = "Space points evenly along the curve"
     bl_options = {'REGISTER', 'UNDO'}
 
+    interpolation: EnumProperty(
+        name="Interpolation",
+        items=(("cubic", "Cubic", "Natural cubic spline"),
+               ("linear", "Linear", "Simple linear interpolation")),
+        default='cubic'
+    )
+    influence: FloatProperty(name="Influence", default=100.0, min=0.0, max=100.0, subtype='PERCENTAGE')
+    
+    lock_x: BoolProperty(name="Lock X", default=False)
+    lock_y: BoolProperty(name="Lock Y", default=False)
+    lock_z: BoolProperty(name="Lock Z", default=False)
+
     def execute(self, context):
-        self.report({'INFO'}, "Space Operator not implemented for Curves yet.")
+        for obj in context.selected_objects:
+            if obj.type != 'CURVE':
+                continue
+                
+            for spline in obj.data.splines:
+                points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
+                num_points = len(points)
+                if num_points < 3:
+                    continue
+
+                if spline.type == 'BEZIER':
+                    selection_mask = [p.select_control_point for p in points]
+                else:
+                    selection_mask = [p.select for p in points]
+                    
+                if not any(selection_mask):
+                    continue
+                    
+                # Identify segments
+                segments = []
+                if all(selection_mask):
+                    segments.append(list(range(num_points)))
+                else:
+                    current_run = []
+                    for i, sel in enumerate(selection_mask):
+                        if sel:
+                            current_run.append(i)
+                        else:
+                            if current_run:
+                                segments.append(current_run)
+                                current_run = []
+                    if current_run:
+                        if spline.use_cyclic_u and selection_mask[0]:
+                            if len(segments) > 0 and segments[0][0] == 0:
+                                segments[0] = current_run + segments[0]
+                            else:
+                                segments.append(current_run)
+                        else:
+                            segments.append(current_run)
+                            
+                for seg_indices in segments:
+                    if len(seg_indices) < 2: continue
+                    
+                    # Space works on Position (and potentially interpolation of attributes)
+                    # We will space Position, Tilt, Radius
+                    attrs = ['position', 'tilt', 'radius']
+                    
+                    # Gather Data
+                    # positions for t-calc
+                    segment_points_co = []
+                    for idx in seg_indices:
+                        segment_points_co.append(points[idx].co.to_3d())
+                        
+                    # all data for interpolation
+                    segment_data = []
+                    for idx in seg_indices:
+                        segment_data.append(get_data_from_index(points, idx, attrs))
+                        
+                    # 1. Calculate T and Target T
+                    tknots, tpoints = space_calculate_t(segment_points_co)
+                    
+                    # 2. Calculate Splines on original data
+                    if self.interpolation == 'cubic':
+                        splines = calculate_cubic_splines(tknots, segment_data)
+                    else:
+                        splines = calculate_linear_splines(tknots, segment_data)
+                        
+                    # 3. Calculate New Verts at valid T
+                    move_list = space_calculate_verts(self.interpolation, tknots, tpoints, splines)
+                    
+                    # 4. Apply
+                    val_influence = self.influence / 100.0
+                    
+                    for local_idx, new_val_list in move_list:
+                        spline_idx = seg_indices[local_idx]
+                        p = points[spline_idx]
+                        
+                        offset = 0
+                        
+                        # Position
+                        old_co_3d = p.co.to_3d()
+                        target_co_3d = mathutils.Vector(new_val_list[offset:offset+3])
+                        
+                        # Apply Locks
+                        if self.lock_x: target_co_3d.x = old_co_3d.x
+                        if self.lock_y: target_co_3d.y = old_co_3d.y
+                        if self.lock_z: target_co_3d.z = old_co_3d.z
+                        
+                        final_co_3d = old_co_3d.lerp(target_co_3d, val_influence)
+                        
+                        if spline.type == 'BEZIER':
+                            delta = final_co_3d - old_co_3d
+                            p.handle_left += delta
+                            p.handle_right += delta
+                            p.co = final_co_3d
+                        else:
+                            w = p.co[3]
+                            p.co = final_co_3d.to_4d()
+                            p.co[3] = w
+                        offset += 3
+                        
+                        # Tilt
+                        old_tilt = p.tilt
+                        target_tilt = new_val_list[offset]
+                        p.tilt = old_tilt + (target_tilt - old_tilt) * val_influence
+                        offset += 1
+                        
+                        # Radius
+                        old_rad = p.radius
+                        target_rad = new_val_list[offset]
+                        p.radius = old_rad + (target_rad - old_rad) * val_influence
+                        offset += 1
+
         return {'FINISHED'}
 
 def register():
