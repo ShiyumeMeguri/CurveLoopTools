@@ -36,7 +36,7 @@ class CURVELOOPTOOLS_MT_menu(bpy.types.Menu):
         # User said: "default options override... conflict ones"
         # If I don't set it, it uses default from operator definition (False).
         # User wants "Relax" to be standard relax.
-        op_relax.opt_lock_length = True 
+        op_relax.opt_lock_length = False 
         op_relax.opt_lock_tilt = False
         op_relax.opt_lock_radius = False
         

@@ -514,49 +514,52 @@ class CurveLoopTools_OT_relax(bpy.types.Operator):
                     # Current smoothed coords
                     coords = [p.co.to_3d() for p in pts]
                     new_len = 0.0
+                    vecs = []
                     for k in range(len(coords)-1):
-                        new_len += (coords[k+1] - coords[k]).length
+                        v = coords[k+1] - coords[k]
+                        new_len += v.length
+                        vecs.append(v)
                     
                     if new_len > 1e-6:
                         factor = target_len / new_len
-                        # Scale segments?
-                        # Simple approach: Rebuild chain from start point (pts[0])
-                        # P_next = P_curr + (Dir * (old_len * factor)) ??
-                        # Wait, (old_len * factor) is just new_len * factor = target_len ... no
-                        # We want the DISTANCE between points to scale up.
-                        
-                        # BUT, simply scaling vector (P_i+1 - P_i) by factor restores total length
-                        # but preserves the new smoothed direction!
                         
                         start_co = coords[0]
-                        current_trace = start_co
+                        current_trace = start_co.copy()
                         
-                        # We apply from start to end (propagating)
-                        # Caution: if it's cyclic, this might break the loop closure?
-                        # 'get_contiguous_segments' handles cyclic by potentially returning full loop (duplicate start/end?)
-                        # If duplicate start/end, we should handle carefully.
-                        # Assuming linear chain for now.
+                        # Generate candidate chain (pinned at start, loose at end)
+                        candidate_positions = [start_co] # Index 0
                         
-                        for k in range(len(coords)-1):
-                            vec = coords[k+1] - coords[k]
-                            vec_len = vec.length
+                        for vec in vecs:
                             # Scale vector
                             new_vec = vec * factor
+                            current_trace += new_vec
+                            candidate_positions.append(current_trace.copy())
                             
-                            # Next point
-                            next_pos = current_trace + new_vec
-                            
-                            # Apply to pts[k+1]
-                            # pts[0] stays fixed.
-                            
-                            bp = pts[k+1]
-                            if isinstance(bp, bpy.types.BezierSplinePoint):
-                                utils.move_bezier_point(bp, next_pos)
-                            else:
-                                if len(bp.co)==4: bp.co = next_pos.to_4d()
-                                else: bp.co = next_pos
+                        # Now candidate_positions has the shape with correct TOTAL length, 
+                        # but the end point (candidate_positions[-1]) has drifted.
+                        # We must pin the end point back to coords[-1] (which is the fixed endpoint from relax).
+                        
+                        actual_end = coords[-1]
+                        drift_vec = actual_end - candidate_positions[-1]
+                        
+                        # Distribute drift linearly
+                        # i=0 -> correction=0
+                        # i=Last -> correction=drift_vec
+                        count = len(candidate_positions)
+                        if count > 1:
+                            for k in range(1, count):
+                                # Skip start point (k=0), it's already correct/pinned
+                                t = k / (count - 1)
+                                correction = drift_vec * t
+                                final_pos = candidate_positions[k] + correction
                                 
-                            current_trace = next_pos
+                                # Apply
+                                bp = pts[k]
+                                if isinstance(bp, bpy.types.BezierSplinePoint):
+                                    utils.move_bezier_point(bp, final_pos)
+                                else:
+                                    if len(bp.co)==4: bp.co = final_pos.to_4d()
+                                    else: bp.co = final_pos
 
         return {'FINISHED'}
 
