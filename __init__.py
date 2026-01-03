@@ -39,7 +39,7 @@ class CURVELOOPTOOLS_MT_menu(bpy.types.Menu):
         op_relax.opt_lock_length = False 
         op_relax.opt_lock_tilt = False
         op_relax.opt_lock_radius = False
-        op_relax.regular = False
+        op_relax.regular = True
 
         
         op_tilt = layout.operator("curve_looptools.relax", text="Relax Tilt")

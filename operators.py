@@ -1,579 +1,552 @@
 import bpy
 import mathutils
-from . import utils
+import math
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty
+from bpy.types import Operator
 
-class CurveLoopTools_OT_flatten(bpy.types.Operator):
-    bl_idname = "curve_looptools.flatten"
-    bl_label = "Flatten"
-    bl_description = "Flatten selected control points"
-    bl_options = {'REGISTER', 'UNDO'}
+# ########################################
+# ##### General Math functions ###########
+# ########################################
+
+def calculate_cubic_splines(tknots, knots):
+    """
+    Calculates natural cubic splines through all given knots.
+    Adapted from LoopTools to support N-dimensions.
+    """
+    n = len(knots)
+    if n < 2:
+        return False
     
-    plane: bpy.props.EnumProperty(
-        name="Plane",
-        items=[('BEST_FIT', "Best Fit", "Calculate best fit plane"),
-               ('NORMAL', "Normal", "Use average normal"),
-               ('VIEW', "View", "Align to view")],
-        default='BEST_FIT'
-    )
-
-    @classmethod
-    def poll(cls, context):
-        return context.active_object and context.active_object.type == 'CURVE' and context.mode == 'EDIT_CURVE'
-
-    def execute(self, context):
-        points_data = list(utils.get_selected_points(context))
-        if not points_data:
-            self.report({'WARNING'}, "No points selected")
-            return {'CANCELLED'}
-
-        # We care about coordinates
-        # For Bezier, we flatten control points. Handles?
-        # If we flatten control points, handles should probably be projected to the plane too 
-        # to ensure the curve segment stays flat.
+    # Check dimension
+    if isinstance(knots[0], (float, int)):
+        dim = 1
+        locs = [[k] for k in knots]
+    else:
+        dim = len(knots[0])
+        locs = [list(k) for k in knots]
         
-        # Collect positions
-        positions = [p[2].co.copy() for p in points_data]
-        
-        # Calculate Plane
-        co_list = [p[2].co.to_3d() for p in points_data]
-        if self.plane == 'BEST_FIT':
-            com, normal = utils.calculate_plane(co_list, method='best_fit')
-        elif self.plane == 'NORMAL':
-            # View normal or average normal?
-            # 'NORMAL' in LoopTools often means Average Normal.
-            # But calculating average normal for arbitrary points is tricky.
-            # Use Best Fit for now as fallback.
-            com, normal = utils.calculate_plane(co_list, method='best_fit')
-        elif self.plane == 'VIEW':
-            # Get View Normal from context
-            view_mat = context.space_data.region_3d.view_matrix
-            normal = view_mat.to_3x3().inverted() @ mathutils.Vector((0,0,1))
-            com = sum(co_list, mathutils.Vector()) / len(co_list)
-
-        
-        # Project
-        # P_proj = P - ((P - Center) dot Normal) * Normal
-        
-        for i, (spline, idx, bp) in enumerate(points_data):
-            vec = bp.co - com
-            dist = vec.dot(normal)
-            proj = bp.co - (dist * normal)
-            
-            if spline.type == 'BEZIER':
-                # Move Handles too!
-                # Project handles relative to the projected point?
-                # Or just project them absolutely?
-                # Absolute projection ensures flatness.
-                
-                h1_vec = bp.handle_left - com
-                h1_dist = h1_vec.dot(normal)
-                h1_proj = bp.handle_left - (h1_dist * normal)
-                
-                h2_vec = bp.handle_right - com
-                h2_dist = h2_vec.dot(normal)
-                h2_proj = bp.handle_right - (h2_dist * normal)
-                
-                bp.co = proj
-                bp.handle_left = h1_proj
-                bp.handle_right = h2_proj
+    x = tknots[:]
+    result = []
+    
+    # Solve for each dimension independently
+    for j in range(dim):
+        a = []
+        for i in locs:
+            a.append(i[j])
+        h = []
+        for i in range(n - 1):
+            val = x[i + 1] - x[i]
+            if val == 0:
+                h.append(1e-8)
             else:
-                # NURBS/POLY has 'co' as 4D (x,y,z,w) usually or 3D?
-                # spline.points[i].co is Vector(4) for NURBS (x,y,z,w).
-                
-                if len(bp.co) == 4:
-                    # preserve W
-                    w = bp.co.w
-                    bp.co = mathutils.Vector((proj.x, proj.y, proj.z, w))
-                else:
-                    bp.co = proj
-
-
-        return {'FINISHED'}
-
-class CurveLoopTools_OT_space(bpy.types.Operator):
-    bl_idname = "curve_looptools.space"
-    bl_label = "Space"
-    bl_description = "Space selected control points evenly"
-    bl_options = {'REGISTER', 'UNDO'}
-    
-    influence: bpy.props.FloatProperty(name="Influence", default=100.0, min=0.0, max=100.0, subtype='PERCENTAGE')
-
-    @classmethod
-    def poll(cls, context):
-        return context.active_object and context.active_object.type == 'CURVE' and context.mode == 'EDIT_CURVE'
-
-    def execute(self, context):
-        points_data = list(utils.get_selected_points(context))
-        if not points_data:
-            return {'CANCELLED'}
+                h.append(val)
         
-        segments = utils.get_contiguous_segments(points_data)
-
-        for seg in segments:
-            if len(seg) < 3:
-                 continue
+        q = [0.0] # Placeholder, will be ignored/overwritten loop starts at 1
+        for i in range(1, n - 1):
+            term = 3 / h[i] * (a[i + 1] - a[i]) - 3 / h[i - 1] * (a[i] - a[i - 1])
+            q.append(term)
             
-            # Get points
-            s = seg[0][0]
-            if s.type == 'BEZIER':
-                pts = [item[2] for item in seg]
-                coords = [p.co.copy() for p in pts]
+        l = [1.0]
+        u = [0.0]
+        z = [0.0]
+        
+        for i in range(1, n - 1):
+            val = 2 * (x[i + 1] - x[i - 1]) - h[i - 1] * u[i - 1]
+            if val == 0:
+                val = 1e-8
+            l.append(val)
+            u.append(h[i] / l[i])
+            z.append((q[i] - h[i - 1] * z[i - 1]) / l[i])
+            
+        l.append(1.0)
+        z.append(0.0)
+        
+        b = [0.0 for _ in range(n - 1)]
+        c = [0.0 for _ in range(n)]
+        d = [0.0 for _ in range(n - 1)]
+        
+        c[n - 1] = 0.0
+        for i in range(n - 2, -1, -1):
+            c[i] = z[i] - u[i] * c[i + 1]
+            b[i] = (a[i + 1] - a[i]) / h[i] - h[i] * (c[i + 1] + 2 * c[i]) / 3
+            d[i] = (c[i + 1] - c[i]) / (3 * h[i])
+            
+        for i in range(n - 1):
+            if len(result) <= i:
+                result.append([])
+            # result[i] will contain lists of [a,b,c,d,x] for each dimension
+            result[i].append([a[i], b[i], c[i], d[i], x[i]])
+
+    # Reformat result to match LoopTools structure: list of splines per segment
+    # LoopTools returns: list of [ [ax,bx...], [ay,by...], [az,bz...] ] per segment
+    splines = []
+    for i in range(n - 1):
+        # result[i] is [[a,b,c,d,x]_dim0, [a,b,c,d,x]_dim1, ...]
+        splines.append(result[i])
+        
+    return splines
+
+def calculate_linear_splines(tknots, knots):
+    """
+    Calculates linear splines.
+    """
+    splines = []
+    
+    if isinstance(knots[0], (float, int)):
+        dim = 1
+        conversion = lambda x: [x]
+        deconversion = lambda x: x[0]
+    else:
+        dim = len(knots[0])
+        conversion = lambda x: list(x)
+        deconversion = lambda x: x
+        
+    for i in range(len(knots) - 1):
+        a = conversion(knots[i])
+        b = conversion(knots[i + 1])
+        # d = b - a
+        d = [b[k] - a[k] for k in range(dim)]
+        
+        t = tknots[i]
+        u = tknots[i + 1] - t
+        
+        # Structure: [ [a0, d0, t, u], [a1, d1, t, u], ... ]
+        segment_splines = []
+        for k in range(dim):
+            segment_splines.append([a[k], d[k], t, u])
+        splines.append(segment_splines)
+        
+    return splines
+
+
+# ########################################
+# ##### Relax functions for Curves #######
+# ########################################
+
+def relax_calculate_knots(points_len, circular):
+    """
+    Splits points into two sets (Even/Odd) for smoothing, similar to LoopTools.
+    points_len: number of points in the loop
+    circular: boolean
+    """
+    knots = [[], []]
+    points = [[], []]
+    
+    loop = list(range(points_len)) # indices
+    
+    if circular:
+        if len(loop) % 2 == 1: # odd
+             extend = [False, True, 0, 1, 0, 1]
+        else: # even
+             extend = [True, False, 0, 1, 1, 2]
+    else:
+        if len(loop) % 2 == 1: # odd
+             extend = [False, False, 0, 1, 1, 2]
+        else: # even
+             extend = [False, False, 0, 1, 1, 2]
+             
+    for j in range(2):
+        temp_loop = loop[:]
+        if extend[j]:
+            temp_loop = [loop[-1]] + loop + [loop[0]]
+            
+        # Knots indices (every 2nd point)
+        k_indices = []
+        start_k = extend[2 + 2 * j]
+        for i in range(start_k, len(temp_loop), 2):
+            k_indices.append(temp_loop[i])
+        knots[j] = k_indices
+        
+        # Points to move indices
+        p_indices = []
+        start_p = extend[3 + 2 * j]
+        for i in range(start_p, len(temp_loop), 2):
+            idx = temp_loop[i]
+            if idx == loop[-1] and not circular:
+               continue
+            # Avoid duplicates if logic produces them (LoopTools check)
+            if len(p_indices) == 0:
+                p_indices.append(idx)
+            elif idx != p_indices[0]:
+                p_indices.append(idx)
+        points[j] = p_indices
+        
+        if circular:
+            if knots[j][0] != knots[j][-1]:
+                knots[j].append(knots[j][0])
+                
+    if len(points[1]) == 0:
+        knots.pop(1)
+        points.pop(1)
+        
+    return knots, points
+
+def relax_calculate_t(points_co, knots, points_indices, regular):
+    """
+    Calculates t parameter (length along curve) for knots and points.
+    points_co: list of Vectors (positions) corresponding to segment indices
+    """
+    all_tknots = []
+    all_tpoints = []
+    
+    for i in range(len(knots)):
+        k_list = knots[i]
+        p_list = points_indices[i]
+        
+        mix = []
+        
+        nk = len(k_list)
+        np = len(p_list)
+        
+        # Safe interleaving
+        max_len = max(nk, np)
+        for j in range(max_len):
+            if j < nk:
+                mix.append((True, k_list[j]))
+            if j < np:
+                mix.append((False, p_list[j]))
+                
+        # Now calculate lengths
+        len_total = 0
+        loc_prev = None
+        tknots = []
+        tpoints = []
+        
+        for is_knot, idx in mix:
+            # get location from points_co
+            loc = points_co[idx]
+                
+            if loc_prev is None:
+                loc_prev = loc
+            
+            dist = (loc - loc_prev).length
+            len_total += dist
+            
+            if is_knot:
+                tknots.append(len_total)
             else:
-                pts = [item[2] for item in seg]
-                coords = [p.co.to_3d() for p in pts]
-            
-            # Calculate total chord length
-            total_len = 0.0
-            lengths = [0.0]
-            for k in range(len(coords)-1):
-                d = (coords[k+1] - coords[k]).length
-                total_len += d
-                lengths.append(total_len)
+                tpoints.append(len_total)
                 
-            # Target average interval
-            step = total_len / (len(coords) - 1)
+            loc_prev = loc
             
-            # New positions
-            for k in range(1, len(coords)-1):
-                 target_d = k * step
-                 
-                 # Find j where lengths[j] <= target_d < lengths[j+1]
-                 for j in range(len(lengths)-1):
-                     if lengths[j] <= target_d <= lengths[j+1]:
-                         segment_len = lengths[j+1] - lengths[j]
-                         if segment_len < 1e-6:
-                             new_pos = coords[j]
-                         else:
-                             factor = (target_d - lengths[j]) / segment_len
-                             new_pos = coords[j].lerp(coords[j+1], factor)
-                         
-                         # Apply influence
-                         current_pos = coords[k]
-                         final_pos = current_pos.lerp(new_pos, self.influence / 100.0)
-                         
-                         utils.move_bezier_point(pts[k], final_pos) if s.type == 'BEZIER' else setattr(pts[k], 'co', final_pos.to_4d() if len(pts[k].co)==4 else final_pos)
-                         break
-    
-        return {'FINISHED'}
-
-class CurveLoopTools_OT_circle(bpy.types.Operator):
-    bl_idname = "curve_looptools.circle"
-    bl_label = "Circle"
-    bl_description = "Flatten to circle"
-    bl_options = {'REGISTER', 'UNDO'}
-    
-    fit: bpy.props.EnumProperty(
-        name="Fit",
-        items=[('BEST_FIT', "Best Fit", "Calculate best fit circle"),
-               ('INSIDE', "Inside", "Fit inside points"),
-               ('OUTSIDE', "Outside", "Fit outside points")],
-        default='BEST_FIT'
-    )
-    flatten: bpy.props.BoolProperty(name="Flatten", default=True, description="Flatten points to plane")
-    radius: bpy.props.FloatProperty(name="Radius", default=0.0, min=0.0, description="Custom radius (0 = auto)")
-    regular: bpy.props.BoolProperty(name="Regular", default=True, description="Distribute points evenly")
-    influence: bpy.props.FloatProperty(name="Influence", default=100.0, min=0.0, max=100.0, subtype='PERCENTAGE')
-
-    @classmethod
-    def poll(cls, context):
-        return context.active_object and context.active_object.type == 'CURVE' and context.mode == 'EDIT_CURVE'
-
-    def execute(self, context):
-        points_data = list(utils.get_selected_points(context))
-        if not points_data:
-            return {'CANCELLED'}
-        
-        # 1. Calc Plane
-        co_list = [p[2].co.to_3d() for p in points_data]
-        com, normal = utils.calculate_plane(co_list, method='best_fit')
-        
-        if not self.flatten:
-             # If not flatten, we project to the 'cylinder' defined by the circle?
-             # LoopTools Circle without flatten projects points to the circle cylinder along normal?
-             # Or just projects to closest point on circle ring in 3D? usually on plane.
-             # Standard LoopTools 'Circle' flattens by default.
-             pass
-             
-        # 2. Calc Radius
-        # Project points to plane to get 2D coords relative to COM
-        # Base Axis X, Y
-        z_axis = normal
-        x_axis = mathutils.Vector((1,0,0))
-        if abs(z_axis.x) > 0.9: x_axis = mathutils.Vector((0,1,0))
-        y_axis = z_axis.cross(x_axis).normalized()
-        x_axis = y_axis.cross(z_axis).normalized()
-        
-        avg_dist = 0.0
-        projected_pts = []
-        for p in co_list:
-            vec = p - com
-            # project to plane
-            dist_n = vec.dot(z_axis)
-            p_on_plane = p - dist_n * z_axis
-            
-            # Distance to center (radius estimate)
-            r_vec = p_on_plane - com
-            r = r_vec.length
-            avg_dist += r
-            projected_pts.append({'pt': p, 'on_plane': p_on_plane, 'r': r, 'vec': r_vec})
-            
-        avg_dist /= len(co_list)
-        radius = self.radius if self.radius > 0 else avg_dist
-        
-        # 3. Calculate new positions
-        new_positions = []
-        
-        if self.regular:
-             # Sort by angle
-             # Angle relative to X axis
-             for item in projected_pts:
-                 v = item['vec']
-                 x = v.dot(x_axis)
-                 y = v.dot(y_axis)
-                 item['angle'] = math.atan2(y, x)
-                 
-             projected_pts.sort(key=lambda x: x['angle'])
-             
-             # Distribute evenly
-             step = 2 * math.pi / len(projected_pts)
-             # Start angle? align to first point?
-             # Keep total rotation minimal? 
-             # Align first point's angle
-             start_angle = projected_pts[0]['angle'] 
-             
-             for i, item in enumerate(projected_pts):
-                 theta = start_angle + i * step
-                 # circle pos
-                 circle_pos = com + radius * (math.cos(theta) * x_axis + math.sin(theta) * y_axis)
-                 
-                 if not self.flatten:
-                     # Add back original height?
-                     vec = item['pt'] - com
-                     height = vec.dot(z_axis)
-                     circle_pos += height * z_axis
-                     
-                 new_positions.append(circle_pos)
-                 
-             # We need to map back to original indices.
-             # But we sorted 'projected_pts'.
-             # We need to preserve the mapping to 'points_data'.
-             # Wait, selection order in 'points_data' might not be loop order.
-             # If points are connected, we should respect that order.
-             # 'get_selected_points' yields by spline index.
-             # If 'Regular', we usually want to follow the spline connectivity.
-             
-             # Re-approach: Iterate segments.
-             pass
-        
-        # Simple implementation without 'Regular' sorting for now if not segments
-        # If Regular, we must respect Spline order.
-        
-        segments = utils.get_contiguous_segments(points_data)
-        # Flatten segments list
-        # points_data is already sorted by spline/index in get_selected_points if we trusted utils?
-        # utils.get_selected_points iterates splines/points in order.
-        
-        # For Circle, usually we act on a closed loop.
-        # Construct the "Loop" from segments.
-        
-        # If Regular:
-        if self.regular:
-            # Re-collect all points in order
-            ordered_items = []
-            for seg in segments:
-                ordered_items.extend(seg)
-            
-            # calculate angle of FIRST point relative to center to set phase?
-            # Or fit line best?
-            
-            # Let's assume the points are in correct order along the perimeter.
-            total_pts = len(ordered_items)
-            step = 2 * math.pi / total_pts
-            
-            # We need a starting angle.
-            # Use the angle of the first point.
-            p0 = ordered_items[0][2].co.to_3d()
-            v0 = p0 - com
-            # Project v0 to plane
-            v0_plane = v0 - v0.dot(z_axis) * z_axis
-            start_angle = math.atan2(v0_plane.dot(y_axis), v0_plane.dot(x_axis))
-            
-            for i, (s, idx, bp) in enumerate(ordered_items):
-                theta = start_angle + i * step
-                # Target pos
-                target = com + radius * (math.cos(theta) * x_axis + math.sin(theta) * y_axis)
+        if regular:
+            # Distribute points evenly between knots
+            # LoopTools: tpoints[p] = (tknots[p] + tknots[p+1]) / 2
+            # This places the point exactly in the middle (parametrically) of the two knots.
+            new_tpoints = []
+            for p_idx in range(len(tpoints)):
+                # Ensure we have enough knots. 
+                # With 'mix' order K, P, K, P... 
+                # point[p] between knot[p] and knot[p+1] ?
+                # The assumption is that tknots has indices corresponding to the same segments...
+                # Note: LoopTools assumption: mix is K0, P0, K1, P1 ...
+                # tknots[p] is K0 length, tknots[p+1] is K1 length.
+                # So P0 should be at (K0+K1)/2. 
                 
-                if not self.flatten:
-                    # Height
-                    h = (bp.co.to_3d() - com).dot(z_axis)
-                    target += h * z_axis
+                # Verify indices:
+                # If j=0: mix has K0, P0.
+                # tknots will have 1 element, tpoints 1 element.
+                # next iteration: K1, P1...
+                # So indices align.
                 
-                factor = self.influence / 100.0
-                current = bp.co.to_3d()
-                final = current.lerp(target, factor)
-                utils.move_bezier_point(bp, final) if s.type == 'BEZIER' else setattr(bp, 'co', final.to_4d() if len(bp.co)==4 else final)
-
-        else:
-            # Irregular (Project nearest)
-            for s, idx, bp in points_data:
-                p = bp.co.to_3d()
-                vec = p - com
-                h = vec.dot(z_axis)
-                p_plane = p - h * z_axis
-                
-                if p_plane.length_squared < 1e-6:
-                    dir_vec = mathutils.Vector((1,0,0))
+                if p_idx + 1 < len(tknots):
+                    val = (tknots[p_idx] + tknots[p_idx+1]) / 2.0
+                    new_tpoints.append(val)
                 else:
-                    dir_vec = p_plane.normalized()
-                
-                target = com + dir_vec * radius
-                
-                if not self.flatten:
-                    target += h * z_axis
-                
-                factor = self.influence / 100.0
-                current = bp.co.to_3d()
-                final = current.lerp(target, factor)
-                
-                utils.move_bezier_point(bp, final) if s.type == 'BEZIER' else setattr(bp, 'co', final.to_4d() if len(bp.co)==4 else final)
-                
-        return {'FINISHED'}
+                    # Fallback if at end
+                     # If circular and wrap occurred?
+                    if len(knots) > 1 and len(knots[0]) > 0: # just safety
+                         new_tpoints.append(tpoints[p_idx])
+                    else:
+                         new_tpoints.append(tpoints[p_idx])
 
-class CurveLoopTools_OT_relax(bpy.types.Operator):
+            tpoints = new_tpoints
+            
+        all_tknots.append(tknots)
+        all_tpoints.append(tpoints)
+        
+    return all_tknots, all_tpoints
+
+def get_data_from_index(points, index, attributes):
+    # Retrieve data vector [x, y, z, tilt, radius]
+    p = points[index]
+    data = []
+    # Position
+    if 'position' in attributes:
+        data.extend([p.co.x, p.co.y, p.co.z])
+    # Tilt
+    if 'tilt' in attributes:
+        data.append(p.tilt)
+    # Radius
+    if 'radius' in attributes:
+        data.append(p.radius)
+    return data
+
+def relax_calculate_verts(interpolation, tknots, knots, tpoints, points_indices, splines):
+    """
+    Interpolates new values for 'points' based on splines.
+    Returns list of tuples: (index, [new_values])
+    """
+    moves = []
+    
+    # Iterate over the two passes (or 1)
+    for i in range(len(knots)): # i is pass index (0 or 1)
+        k_list = knots[i]
+        p_list = points_indices[i]
+        tk = tknots[i] # parametric positions of knots
+        tp = tpoints[i] # parametric positions of points (targets)
+        seg_splines = splines[i] # list of splines
+        
+        for j, p_idx in enumerate(p_list):
+            if j >= len(tp):
+                continue
+                
+            m = tp[j] # target t
+            
+            # Find knot n where tk[n] <= m
+            n = -1
+            # fast check if m matches a knot exactly (rare)
+            if m in tk:
+                 n = tk.index(m)
+            else:
+                # Find interval
+                for k_idx in range(len(tk)):
+                    if tk[k_idx] > m:
+                        n = k_idx - 1
+                        break
+                if n == -1:
+                    n = len(tk) - 1 # Should not happen if m inside range
+                    
+            # Clamp n to valid spline segments
+            if n > len(seg_splines) - 1:
+                n = len(seg_splines) - 1
+            if n < 0:
+                n = 0
+                
+            # Evaluate Spline
+            new_vals = []
+            
+            if interpolation == 'cubic':
+                # seg_splines[n] is list of dims: [[a,b,c,d,x], [a,b,c,d,x]...]
+                dims = seg_splines[n]
+                for d_idx in range(len(dims)):
+                    a, b, c, d_coeff, tx = dims[d_idx]
+                    dt = m - tx
+                    # The LoopTools code defines x (tx) as the starting t of the segment
+                    # So dt is distance from start of segment.
+                    val = a + b*dt + c*(dt**2) + d_coeff*(dt**3)
+                    new_vals.append(val)
+            else: # linear
+                # seg_splines[n] is [[a, d, t, u], ...]
+                dims = seg_splines[n]
+                for d_idx in range(len(dims)):
+                    a, d_val, t, u = dims[d_idx]
+                    if u == 0: u = 1e-8
+                    val = ((m - t) / u) * d_val + a
+                    new_vals.append(val)
+                    
+            moves.append((p_idx, new_vals))
+            
+    return moves
+
+
+class CurveRelax(Operator):
     bl_idname = "curve_looptools.relax"
     bl_label = "Relax"
-    bl_description = "Relax selected points"
+    bl_description = "Relax the curve, smoothing it out"
     bl_options = {'REGISTER', 'UNDO'}
-    
-    iterations: bpy.props.IntProperty(name="Iterations", default=1, min=1, max=25)
-    regular: bpy.props.BoolProperty(name="Regular", default=True)
-    
-    relax_position: bpy.props.BoolProperty(name="Position", default=True)
-    relax_tilt: bpy.props.BoolProperty(name="Tilt", default=False)
-    relax_radius: bpy.props.BoolProperty(name="Radius", default=False)
-    opt_lock_radius: bpy.props.BoolProperty(name="Lock Radius", default=False, description="Preserve original radius volume")
-    opt_lock_tilt: bpy.props.BoolProperty(name="Lock Tilt", default=False, description="Preserve original total tilt")
-    opt_lock_length: bpy.props.BoolProperty(name="Lock Length", default=False, description="Preserve original curve length")
 
-    @classmethod
-    def poll(cls, context):
-        return context.active_object and context.active_object.type == 'CURVE' and context.mode == 'EDIT_CURVE'
+    relax_position: BoolProperty(name="Relax Position", default=True)
+    relax_tilt: BoolProperty(name="Relax Tilt", default=False)
+    relax_radius: BoolProperty(name="Relax Radius", default=False)
+    
+    # Locking - kept from UI, mainly to skip dimensions if needed
+    opt_lock_length: BoolProperty(name="Lock Length", default=False) 
+    opt_lock_tilt: BoolProperty(name="Lock Tilt", default=False) # Redundant with relax_tilt=False?
+    opt_lock_radius: BoolProperty(name="Lock Radius", default=False)
+    
+    regular: BoolProperty(name="Regular", default=True, description="Distribute points evenly")
+    
+    interpolation: EnumProperty(
+        name="Interpolation",
+        items=(("cubic", "Cubic", "Natural cubic spline"),
+               ("linear", "Linear", "Simple linear interpolation")),
+        default='cubic'
+    )
+    iterations: IntProperty(name="Iterations", default=1, min=1, max=50) # Allow int input
 
     def execute(self, context):
-        points_data = list(utils.get_selected_points(context))
-        segments = utils.get_contiguous_segments(points_data)
-        
-        for _ in range(self.iterations):
-            # Calculate new positions/attributes for all segments
-            updates = []
-            
-            # Tracking for Locks
-            affected_radius_bp = []
-            initial_radius_sum = 0.0
-            
-            affected_tilt_bp = []
-            initial_tilt_sum = 0.0
-            
-            # For length, we need to track per segment because they are independent chains
-            # Map segment_index -> { 'initial_len', 'points_bp' }
-            seg_length_data = {} 
-
-            # 1. Pre-calculate Sums/Lengths
-            for s_idx, seg in enumerate(segments):
-                # Lock Radius
-                if self.relax_radius and self.opt_lock_radius:
-                    for i, (spline, idx, bp) in enumerate(seg):
-                        affected_radius_bp.append(bp)
-                        initial_radius_sum += bp.radius
+        for obj in context.selected_objects:
+            if obj.type != 'CURVE':
+                continue
                 
-                # Lock Tilt
-                if self.relax_tilt and self.opt_lock_tilt:
-                    for i, (spline, idx, bp) in enumerate(seg):
-                         if hasattr(bp, 'tilt'):
-                            affected_tilt_bp.append(bp)
-                            initial_tilt_sum += bp.tilt
-                            
-                # Lock Length
-                if self.relax_position and self.opt_lock_length:
-                    # Calculate total chord length of this segment
-                    current_len = 0.0
-                    pts = [item[2] for item in seg]
-                    # We need ordered coordinates.
-                    # 'seg' is ordered list from contiguous segments function
-                    coords = [p.co.to_3d() for p in pts]
-                    for k in range(len(coords)-1):
-                        current_len += (coords[k+1] - coords[k]).length
-                    
-                    seg_length_data[s_idx] = {'initial': current_len, 'pts': pts}
+            for spline in obj.data.splines:
+                # Identify chunks of selected points
+                points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
+                num_points = len(points)
+                if num_points < 3:
+                    continue
 
-            # 2. Calculate Updates (Relaxation)
-            for seg in segments:
-                s = seg[0][0]
-                total_pts = len(s.bezier_points) if s.type == 'BEZIER' else len(s.points)
-                
-                for i, (spline, idx, bp) in enumerate(seg):
-                    prev_idx = idx - 1
-                    next_idx = idx + 1
+                if spline.type == 'BEZIER':
+                    selection_mask = [p.select_control_point for p in points]
+                else:
+                    selection_mask = [p.select for p in points]
+                if not any(selection_mask):
+                    continue
                     
-                    if spline.use_cyclic_u:
-                        prev_idx %= total_pts
-                        next_idx %= total_pts
-                    else:
-                        if prev_idx < 0: prev_idx = 0 
-                        if next_idx >= total_pts: next_idx = total_pts - 1
+                # Find segments
+                segments = []
+                if all(selection_mask):
+                    segments.append(list(range(num_points)))
+                else:
+                    # Find runs
+                    current_run = []
+                    for i, sel in enumerate(selection_mask):
+                        if sel:
+                            current_run.append(i)
+                        else:
+                            if current_run:
+                                segments.append(current_run)
+                                current_run = []
+                    if current_run:
+                        # Check cyclic wrap
+                        if spline.use_cyclic_u and selection_mask[0]:
+                            if len(segments) > 0 and segments[0][0] == 0:
+                                # Merge last and first
+                                segments[0] = current_run + segments[0]
+                            else:
+                                segments.append(current_run)
+                        else:
+                            segments.append(current_run)
+
+                # Now Relax each segment
+                for seg_indices in segments:
+                    if len(seg_indices) < 3:
+                        continue 
+                        
+                    # Attributes to relax
+                    attrs = []
+                    if self.relax_position: attrs.append('position')
+                    if self.relax_tilt: attrs.append('tilt')
+                    if self.relax_radius: attrs.append('radius')
                     
-                    if (prev_idx == idx or next_idx == idx) and not spline.use_cyclic_u:
+                    if not attrs:
                         continue
 
-                    update_data = {}
-                    
-                    # Position
-                    if self.relax_position:
-                        if spline.type == 'BEZIER':
-                            p_prev = spline.bezier_points[prev_idx].co.to_3d()
-                            p_next = spline.bezier_points[next_idx].co.to_3d()
-                        else:
-                            p_prev = spline.points[prev_idx].co.to_3d()
-                            p_next = spline.points[next_idx].co.to_3d()
-                        
-                        target_pos = (p_prev + p_next) / 2
-                        update_data['pos'] = target_pos
-
-                    # Tilt
-                    if self.relax_tilt:
-                        if spline.type == 'BEZIER':
-                            t_prev = spline.bezier_points[prev_idx].tilt
-                            t_next = spline.bezier_points[next_idx].tilt
-                        else:
-                            t_prev = spline.points[prev_idx].tilt
-                            t_next = spline.points[next_idx].tilt
-                        target_tilt = (t_prev + t_next) / 2
-                        update_data['tilt'] = target_tilt
-
-                    # Radius
-                    if self.relax_radius:
-                        if spline.type == 'BEZIER':
-                            r_prev = spline.bezier_points[prev_idx].radius
-                            r_next = spline.bezier_points[next_idx].radius
-                        else:
-                            r_prev = spline.points[prev_idx].radius
-                            r_next = spline.points[next_idx].radius
-                        target_radius = (r_prev + r_next) / 2
-                        update_data['radius'] = target_radius
-                    
-                    if update_data:
-                        updates.append((bp, update_data, spline))
-
-            # 3. Apply Updates
-            for bp, data, spline in updates:
-                if 'pos' in data:
-                    target = data['pos']
-                    current = bp.co.to_3d()
-                    new_pos = current.lerp(target, 0.5)
-                    if isinstance(bp, bpy.types.BezierSplinePoint):
-                        utils.move_bezier_point(bp, new_pos)
-                    else:
-                        if len(bp.co)==4: bp.co = new_pos.to_4d()
-                        else: bp.co = new_pos
-                
-                if 'tilt' in data and hasattr(bp, 'tilt'):
-                    bp.tilt = bp.tilt * 0.5 + data['tilt'] * 0.5
-                    
-                if 'radius' in data:
-                    bp.radius = bp.radius * 0.5 + data['radius'] * 0.5
-            
-            # 4. Restore Locks
-            
-            # Lock Radius
-            if self.relax_radius and self.opt_lock_radius and affected_radius_bp and initial_radius_sum > 0:
-                new_sum = sum([bp.radius for bp in affected_radius_bp])
-                if new_sum > 1e-6:
-                    factor = initial_radius_sum / new_sum
-                    for bp in affected_radius_bp:
-                        bp.radius *= factor
-            
-            # Lock Tilt
-            if self.relax_tilt and self.opt_lock_tilt and affected_tilt_bp and initial_tilt_sum != 0:
-                 # Tilt can be negative or zero sum? 
-                 # If sum is 0, we can't scale.
-                 # Usually tilt is around 0? No, usually 0 is flat.
-                 # Let's try simple scaling. If sum is tiny, skip to avoid explosion.
-                 new_sum = sum([bp.tilt for bp in affected_tilt_bp])
-                 if abs(new_sum) > 1e-6:
-                     factor = initial_tilt_sum / new_sum
-                     for bp in affected_tilt_bp:
-                         bp.tilt *= factor
-                         
-            # Lock Length (Separately per segment)
-            if self.relax_position and self.opt_lock_length:
-                for s_idx, info in seg_length_data.items():
-                    target_len = info['initial']
-                    pts = info['pts']
-                    if len(pts) < 2 or target_len < 1e-6: continue
-                    
-                    # Current smoothed coords
-                    coords = [p.co.to_3d() for p in pts]
-                    new_len = 0.0
-                    vecs = []
-                    for k in range(len(coords)-1):
-                        v = coords[k+1] - coords[k]
-                        new_len += v.length
-                        vecs.append(v)
-                    
-                    if new_len > 1e-6:
-                        factor = target_len / new_len
-                        
-                        start_co = coords[0]
-                        current_trace = start_co.copy()
-                        
-                        # Generate candidate chain (pinned at start, loose at end)
-                        candidate_positions = [start_co] # Index 0
-                        
-                        for vec in vecs:
-                            # Scale vector
-                            new_vec = vec * factor
-                            current_trace += new_vec
-                            candidate_positions.append(current_trace.copy())
+                    # Iterations
+                    for _ in range(self.iterations):
+                        # Extract 3D Positions for T calc (Always needed)
+                        # We use seg_indices to map local 0..M to spline indices
+                        segment_points_co = []
+                        for idx in seg_indices:
+                            segment_points_co.append(points[idx].co.to_3d())
                             
-                        # Now candidate_positions has the shape with correct TOTAL length, 
-                        # but the end point (candidate_positions[-1]) has drifted.
-                        # We must pin the end point back to coords[-1] (which is the fixed endpoint from relax).
+                        # Extract Data to Relax
+                        segment_data = []
+                        for idx in seg_indices:
+                            segment_data.append(get_data_from_index(points, idx, attrs))
+                            
+                        # Is circular?
+                        is_circular = (spline.use_cyclic_u and len(seg_indices) == num_points)
                         
-                        actual_end = coords[-1]
-                        drift_vec = actual_end - candidate_positions[-1]
+                        # 1. Calculate Knots Indices
+                        knots_indices, points_indices = relax_calculate_knots(len(segment_data), is_circular)
                         
-                        # Distribute drift linearly
-                        # i=0 -> correction=0
-                        # i=Last -> correction=drift_vec
-                        count = len(candidate_positions)
-                        if count > 1:
-                            for k in range(1, count):
-                                # Skip start point (k=0), it's already correct/pinned
-                                t = k / (count - 1)
-                                correction = drift_vec * t
-                                final_pos = candidate_positions[k] + correction
+                        # 2. Calculate t parameters (Using Positions!)
+                        tknots, tpoints = relax_calculate_t(segment_points_co, knots_indices, points_indices, self.regular)
+                        
+                        # 3. Calculate Splines (Using Relax Data)
+                        splines = []
+                        for k_pass_idx in range(len(knots_indices)):
+                            # Gather knot data (values)
+                            k_data = [segment_data[k] for k in knots_indices[k_pass_idx]]
+                            tk = tknots[k_pass_idx]
+                            
+                            if self.interpolation == 'cubic':
+                                s = calculate_cubic_splines(tk, k_data)
+                            else:
+                                s = calculate_linear_splines(tk, k_data)
+                            splines.append(s)
+                            
+                        # 4. Calculate New Verts
+                        move_list = relax_calculate_verts(self.interpolation, tknots, knots_indices, tpoints, points_indices, splines)
+                        
+                        # Apply changes
+                        for local_idx, new_val_list in move_list:
+                            spline_idx = seg_indices[local_idx]
+                            p = points[spline_idx]
+                            
+                            # Update attributes
+                            offset = 0
+                            if self.relax_position:
+                                old_co_3d = p.co.to_3d()
+                                new_co_3d = mathutils.Vector(new_val_list[offset:offset+3])
+                                avg_co_3d = (old_co_3d + new_co_3d) / 2
                                 
-                                # Apply
-                                bp = pts[k]
-                                if isinstance(bp, bpy.types.BezierSplinePoint):
-                                    utils.move_bezier_point(bp, final_pos)
+                                # Handle Handles
+                                if spline.type == 'BEZIER':
+                                    delta = avg_co_3d - old_co_3d
+                                    p.handle_left += delta
+                                    p.handle_right += delta
+                                    p.co = avg_co_3d
                                 else:
-                                    if len(bp.co)==4: bp.co = final_pos.to_4d()
-                                    else: bp.co = final_pos
-
+                                    # For NURBS/Poly, co is 4D (x,y,z,w)
+                                    # Preserve w
+                                    w = p.co[3]
+                                    p.co = avg_co_3d.to_4d() # sets w to 1.0 implicitly
+                                    p.co[3] = w # restore w
+                                    
+                                offset += 3
+                                
+                            if self.relax_tilt:
+                                old_tilt = p.tilt
+                                new_tilt = new_val_list[offset]
+                                p.tilt = (old_tilt + new_tilt) / 2
+                                offset += 1
+                                
+                            if self.relax_radius:
+                                old_rad = p.radius
+                                new_rad = new_val_list[offset]
+                                p.radius = (old_rad + new_rad) / 2
+                                offset += 1
+                                
         return {'FINISHED'}
 
-classes = (
-    CurveLoopTools_OT_flatten,
-    CurveLoopTools_OT_space,
-    CurveLoopTools_OT_circle,
-    CurveLoopTools_OT_relax,
-)
+
+class CurveFlatten(Operator):
+    bl_idname = "curve_looptools.flatten"
+    bl_label = "Flatten"
+    bl_options = {'REGISTER', 'UNDO'}
+    def execute(self, context):
+        self.report({'INFO'}, "Flatten not implemented yet")
+        return {'FINISHED'}
+
+class CurveCircle(Operator):
+    bl_idname = "curve_looptools.circle"
+    bl_label = "Circle"
+    bl_options = {'REGISTER', 'UNDO'}
+    def execute(self, context):
+        self.report({'INFO'}, "Circle not implemented yet")
+        return {'FINISHED'}
+
+class CurveSpace(Operator):
+    bl_idname = "curve_looptools.space"
+    bl_label = "Space"
+    bl_description = "Space points evenly (Not Implemented yet)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        self.report({'INFO'}, "Space Operator not implemented for Curves yet.")
+        return {'FINISHED'}
 
 def register():
-    for cls in classes:
-        bpy.utils.register_class(cls)
+    bpy.utils.register_class(CurveRelax)
+    bpy.utils.register_class(CurveSpace)
+    bpy.utils.register_class(CurveFlatten)
+    bpy.utils.register_class(CurveCircle)
 
 def unregister():
-    for cls in classes:
-        bpy.utils.unregister_class(cls)
+    bpy.utils.unregister_class(CurveCircle)
+    bpy.utils.unregister_class(CurveFlatten)
+    bpy.utils.unregister_class(CurveSpace)
+    bpy.utils.unregister_class(CurveRelax)
