@@ -282,6 +282,73 @@ def get_data_from_index(points, index, attributes):
         data.append(p.radius)
     return data
 
+def relax_calculate_verts(interpolation, tknots, knots, tpoints, points_indices, splines):
+    """
+    Interpolates new values for 'points' based on splines.
+    Returns list of tuples: (index, [new_values])
+    """
+    moves = []
+    
+    # Iterate over the two passes (or 1)
+    for i in range(len(knots)): # i is pass index (0 or 1)
+        k_list = knots[i]
+        p_list = points_indices[i]
+        tk = tknots[i] # parametric positions of knots
+        tp = tpoints[i] # parametric positions of points (targets)
+        seg_splines = splines[i] # list of splines
+        
+        for j, p_idx in enumerate(p_list):
+            if j >= len(tp):
+                continue
+                
+            m = tp[j] # target t
+            
+            # Find knot n where tk[n] <= m
+            n = -1
+            # fast check if m matches a knot exactly (rare)
+            if m in tk:
+                 n = tk.index(m)
+            else:
+                # Find interval
+                for k_idx in range(len(tk)):
+                    if tk[k_idx] > m:
+                        n = k_idx - 1
+                        break
+                if n == -1:
+                    n = len(tk) - 1 # Should not happen if m inside range
+                    
+            # Clamp n to valid spline segments
+            if n > len(seg_splines) - 1:
+                n = len(seg_splines) - 1
+            if n < 0:
+                n = 0
+                
+            # Evaluate Spline
+            new_vals = []
+            
+            if interpolation == 'cubic':
+                # seg_splines[n] is list of dims: [[a,b,c,d,x], [a,b,c,d,x]...]
+                dims = seg_splines[n]
+                for d_idx in range(len(dims)):
+                    a, b, c, d_coeff, tx = dims[d_idx]
+                    dt = m - tx
+                    # The LoopTools code defines x (tx) as the starting t of the segment
+                    # So dt is distance from start of segment.
+                    val = a + b*dt + c*(dt**2) + d_coeff*(dt**3)
+                    new_vals.append(val)
+            else: # linear
+                # seg_splines[n] is [[a, d, t, u], ...]
+                dims = seg_splines[n]
+                for d_idx in range(len(dims)):
+                    a, d_val, t, u = dims[d_idx]
+                    if u == 0: u = 1e-8
+                    val = ((m - t) / u) * d_val + a
+                    new_vals.append(val)
+                    
+            moves.append((p_idx, new_vals))
+            
+    return moves
+
 def space_calculate_t(points_co):
     # Calculate cumulative length t for input points
     tknots = []
@@ -350,67 +417,7 @@ def space_calculate_verts(interpolation, tknots, tpoints, splines):
         
     return moves
 
-    moves = []
-    
-    # Iterate over the two passes (or 1)
-    for i in range(len(knots)): # i is pass index (0 or 1)
-        k_list = knots[i]
-        p_list = points_indices[i]
-        tk = tknots[i] # parametric positions of knots
-        tp = tpoints[i] # parametric positions of points (targets)
-        seg_splines = splines[i] # list of splines
-        
-        for j, p_idx in enumerate(p_list):
-            if j >= len(tp):
-                continue
-                
-            m = tp[j] # target t
-            
-            # Find knot n where tk[n] <= m
-            n = -1
-            # fast check if m matches a knot exactly (rare)
-            if m in tk:
-                 n = tk.index(m)
-            else:
-                # Find interval
-                for k_idx in range(len(tk)):
-                    if tk[k_idx] > m:
-                        n = k_idx - 1
-                        break
-                if n == -1:
-                    n = len(tk) - 1 # Should not happen if m inside range
-                    
-            # Clamp n to valid spline segments
-            if n > len(seg_splines) - 1:
-                n = len(seg_splines) - 1
-            if n < 0:
-                n = 0
-                
-            # Evaluate Spline
-            new_vals = []
-            
-            if interpolation == 'cubic':
-                # seg_splines[n] is list of dims: [[a,b,c,d,x], [a,b,c,d,x]...]
-                dims = seg_splines[n]
-                for d_idx in range(len(dims)):
-                    a, b, c, d_coeff, tx = dims[d_idx]
-                    dt = m - tx
-                    # The LoopTools code defines x (tx) as the starting t of the segment
-                    # So dt is distance from start of segment.
-                    val = a + b*dt + c*(dt**2) + d_coeff*(dt**3)
-                    new_vals.append(val)
-            else: # linear
-                # seg_splines[n] is [[a, d, t, u], ...]
-                dims = seg_splines[n]
-                for d_idx in range(len(dims)):
-                    a, d_val, t, u = dims[d_idx]
-                    if u == 0: u = 1e-8
-                    val = ((m - t) / u) * d_val + a
-                    new_vals.append(val)
-                    
-            moves.append((p_idx, new_vals))
-            
-    return moves
+
 
 
 class CurveRelax(Operator):
