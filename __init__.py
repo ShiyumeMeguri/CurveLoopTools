@@ -1,6 +1,6 @@
 bl_info = {
     "name": "Curve LoopTools",
-    "author": "Antigravity",
+    "author": "ShiyumeMeguri",
     "version": (0, 1, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Edit Tab / Edit Mode Context Menu (W)",
