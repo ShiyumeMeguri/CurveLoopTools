@@ -394,10 +394,114 @@ class LOOPTOOLSPLUS_OT_curve_space(Operator, CurveLoopToolsBase):
                         p.radius = p.radius + (n_vals[4] - p.radius) * infl
         return {'FINISHED'}
 
+# ########################################
+# ##### Plane Calculation Helper #########
+# ########################################
+
+def matrix_determinant(m):
+    determinant = m[0][0] * m[1][1] * m[2][2] + m[0][1] * m[1][2] * m[2][0] \
+        + m[0][2] * m[1][0] * m[2][1] - m[0][2] * m[1][1] * m[2][0] \
+        - m[0][1] * m[1][0] * m[2][2] - m[0][0] * m[1][2] * m[2][1]
+    return determinant
+
+def matrix_invert(m):
+    det = matrix_determinant(m)
+    if det == 0: return None
+    r = mathutils.Matrix((
+        (m[1][1] * m[2][2] - m[1][2] * m[2][1], m[0][2] * m[2][1] - m[0][1] * m[2][2],
+         m[0][1] * m[1][2] - m[0][2] * m[1][1]),
+        (m[1][2] * m[2][0] - m[1][0] * m[2][2], m[0][0] * m[2][2] - m[0][2] * m[2][0],
+         m[0][2] * m[1][0] - m[0][0] * m[1][2]),
+        (m[1][0] * m[2][1] - m[1][1] * m[2][0], m[0][1] * m[2][0] - m[0][0] * m[2][1],
+         m[0][0] * m[1][1] - m[0][1] * m[1][0])))
+    return (r * (1 / det))
+
+def calculate_plane(locs, method="best_fit", view_mat=None):
+    # calculating the center of mass
+    com = mathutils.Vector()
+    for loc in locs:
+        com += loc
+    com /= len(locs)
+    x, y, z = com
+
+    if method == 'best':
+        # creating the covariance matrix
+        mat = mathutils.Matrix(((0.0, 0.0, 0.0),
+                                (0.0, 0.0, 0.0),
+                                (0.0, 0.0, 0.0),
+                                ))
+        for loc in locs:
+            mat[0][0] += (loc[0] - x) ** 2
+            mat[1][0] += (loc[0] - x) * (loc[1] - y)
+            mat[2][0] += (loc[0] - x) * (loc[2] - z)
+            mat[0][1] += (loc[1] - y) * (loc[0] - x)
+            mat[1][1] += (loc[1] - y) ** 2
+            mat[2][1] += (loc[1] - y) * (loc[2] - z)
+            mat[0][2] += (loc[2] - z) * (loc[0] - x)
+            mat[1][2] += (loc[2] - z) * (loc[1] - y)
+            mat[2][2] += (loc[2] - z) ** 2
+
+        # calculating the normal to the plane
+        normal = False
+        try:
+            mat_inv = matrix_invert(mat)
+            if mat_inv: mat = mat_inv
+        except:
+            pass
+            
+        # If inversion failed or we want to find eigenvector, LoopTools does this iterative approach
+        # on the INVERTED matrix? Wait, checking the original code...
+        # yes, mat = matrix_invert(mat) is called.
+        
+        if not normal:
+             # simple axis guess if matrix is singular or just as starting point
+            ax = 2
+            if math.fabs(sum(mat[0])) < math.fabs(sum(mat[1])):
+                if math.fabs(sum(mat[0])) < math.fabs(sum(mat[2])):
+                    ax = 0
+            elif math.fabs(sum(mat[1])) < math.fabs(sum(mat[2])):
+                ax = 1
+            if ax == 0:
+                normal = mathutils.Vector((1.0, 0.0, 0.0))
+            elif ax == 1:
+                normal = mathutils.Vector((0.0, 1.0, 0.0))
+            else:
+                normal = mathutils.Vector((0.0, 0.0, 1.0))
+
+            # warning! this is different from .normalize()
+            # This logic basically finds the eigenvector corresponding to largest eigenvalue of the INVERTED matrix
+            # which corresponds to smallest eigenvalue of covariance matrix => normal direction
+            itermax = 500
+            vec2 = mathutils.Vector((1.0, 1.0, 1.0))
+            for i in range(itermax):
+                vec = vec2
+                vec2 = mat @ vec
+                # Calculate length with double precision to avoid problems with `inf`
+                vec2_length = math.sqrt(vec2[0] ** 2 + vec2[1] ** 2 + vec2[2] ** 2)
+                if vec2_length != 0:
+                    vec2 /= vec2_length
+                if vec2 == vec:
+                    break
+            if vec2.length == 0:
+                vec2 = mathutils.Vector((1.0, 1.0, 1.0))
+            normal = vec2
+
+    elif method == 'view':
+        # calculate view normal
+        if view_mat:
+            rotation = view_mat.to_3x3().inverted()
+            normal = rotation @ mathutils.Vector((0.0, 0.0, 1.0))
+        else:
+            normal = mathutils.Vector((0.0, 0.0, 1.0))
+    else:
+        normal = mathutils.Vector((0.0, 0.0, 1.0))
+            
+    return(com, normal)
+
 class LOOPTOOLSPLUS_OT_curve_flatten(Operator, CurveLoopToolsBase):
     bl_idname = "looptools_plus.curve_flatten"
     bl_label = "Flatten"
-    bl_description = "Project curve points onto a line or plane"
+    bl_description = "Project curve points onto a best-fit plane"
     bl_options = {'REGISTER', 'UNDO'}
     
     influence: FloatProperty(name="Influence", default=100.0, min=0.0, max=100.0, subtype='PERCENTAGE')
@@ -412,7 +516,9 @@ class LOOPTOOLSPLUS_OT_curve_flatten(Operator, CurveLoopToolsBase):
         if self.alignment == 'view':
             rv3d = context.region_data
             if rv3d: view_mat = rv3d.view_matrix.copy()
-            else: self.alignment = 'best'
+            else: 
+                # Fallback if no view context (redundant check but safe)
+                pass 
 
         for obj in context.selected_objects:
             if obj.type != 'CURVE': continue
@@ -423,45 +529,38 @@ class LOOPTOOLSPLUS_OT_curve_flatten(Operator, CurveLoopToolsBase):
                 
                 infl = self.influence / 100.0
                 for seg in segments:
-                    if len(seg) < 2: continue
+                    if len(seg) < 3: continue # Need 3 points for a plane, though 2 could work for line-flattening, user wants plane.
                     pts = [points[idx].co.to_3d() for idx in seg]
                     
-                    # 1. Determine projection line/plane
-                    p1, p2 = pts[0], pts[-1]
-                    center = sum(pts, mathutils.Vector()) / len(pts)
-                    
-                    if self.alignment == 'best':
-                        vec = (p2 - p1)
-                        if vec.length < 1e-7: continue
-                        vec.normalize()
-                    elif self.alignment == 'view':
-                        # Flatten onto the plane parallel to view passing through center
-                        normal = view_mat.to_3x3().inverted().transposed() @ mathutils.Vector((0, 0, 1))
-                        # Or maybe just flatten along a line in view space? Usually 'Flatten' on path is a line.
-                        # Let's do line projection between p1 and p2 projected to view plane.
-                        v1 = view_mat @ p1; v2 = view_mat @ p2
-                        vec_v = (v2 - v1); vec_v.z = 0
-                        if vec_v.length < 1e-7: vec = (p2 - p1).normalized()
-                        else:
-                            vec_v.normalize()
-                            vec = (view_mat.to_3x3().inverted() @ vec_v).normalized()
+                    # 1. Determine Plane (Center and Normal)
+                    if self.alignment in {'best', 'view'}:
+                        center, normal = calculate_plane(pts, self.alignment, view_mat)
                     else: # X, Y, Z
-                        vec = mathutils.Vector((0, 0, 0))
-                        if self.alignment == 'x': vec.x = 1
-                        elif self.alignment == 'y': vec.y = 1
-                        elif self.alignment == 'z': vec.z = 1
+                        center = sum(pts, mathutils.Vector()) / len(pts)
+                        normal = mathutils.Vector((0, 0, 0))
+                        if self.alignment == 'x': normal.x = 1
+                        elif self.alignment == 'y': normal.y = 1
+                        elif self.alignment == 'z': normal.z = 1
                     
                     # 2. Project
                     for idx in seg:
                         p = points[idx]
                         orig_co = p.co.to_3d()
-                        # Project onto line passing through p1 along vec
-                        proj = p1 + vec * (orig_co - p1).dot(vec)
+                        
+                        # Project onto plane defined by center and normal
+                        # proj = p - n * dot(p - center, n)
+                        proj = orig_co - normal * (orig_co - center).dot(normal)
+                        
                         target = orig_co.lerp(proj, infl)
                         if spline.type == 'BEZIER':
-                            delta = target - orig_co; p.handle_left += delta; p.handle_right += delta; p.co = target
+                            delta = target - orig_co
+                            p.handle_left += delta
+                            p.handle_right += delta
+                            p.co = target
                         else:
-                            w = p.co[3]; p.co = target.to_4d(); p.co[3] = w
+                            w = p.co[3]
+                            p.co = target.to_4d()
+                            p.co[3] = w
         return {'FINISHED'}
 
 class LOOPTOOLSPLUS_OT_curve_circle(Operator, CurveLoopToolsBase):
