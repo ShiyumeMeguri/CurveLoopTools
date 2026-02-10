@@ -54,6 +54,9 @@ class LOOPTOOLSPLUS_MT_menu(bpy.types.Menu):
             op_radius.opt_lock_radius = True
             
             layout.operator("looptools_plus.curve_space", text="Space")
+            layout.separator()
+            layout.operator("looptools_plus.curve_linear", text="Linear")
+            layout.operator("looptools_plus.curve_radius", text="Uniform Size")
             
         elif is_mesh and context.space_data and context.space_data.type == 'IMAGE_EDITOR':
             layout.operator("looptools_plus.uv_circle", text="Circle")

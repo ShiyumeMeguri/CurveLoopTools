@@ -394,6 +394,94 @@ class LOOPTOOLSPLUS_OT_curve_space(Operator, CurveLoopToolsBase):
                         p.radius = p.radius + (n_vals[4] - p.radius) * infl
         return {'FINISHED'}
 
+class LOOPTOOLSPLUS_OT_curve_linear(Operator, CurveLoopToolsBase):
+    bl_idname = "looptools_plus.curve_linear"
+    bl_label = "Linear"
+    bl_description = "Linearly interpolate points between start and end, distributing them evenly"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        for obj in context.selected_objects:
+            if obj.type != 'CURVE': continue
+            for spline in obj.data.splines:
+                points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
+                segments = self.get_segments(spline)
+                if not segments: continue
+                
+                for seg in segments:
+                    if len(seg) < 3: continue
+                    
+                    p_start = points[seg[0]].co.to_3d()
+                    p_end = points[seg[-1]].co.to_3d()
+                    
+                    diff = p_end - p_start
+                    dist_total = diff.length
+                    direction = diff.normalized() if dist_total > 0 else mathutils.Vector((0,0,0))
+                    
+                    for i, idx in enumerate(seg):
+                        # Calculate target position
+                        factor = i / (len(seg) - 1)
+                        new_co = p_start + diff * factor
+                        
+                        p = points[idx]
+                        if spline.type == 'BEZIER':
+                            p.co = new_co
+                            # Align handles to the line
+                            # Calculate handle length (approximate)
+                            h_len = dist_total / (len(seg) - 1) * 0.39 # 0.39 is a common handle factor for smooth circle, usage varies
+                            
+                            p.handle_left = new_co - direction * h_len
+                            p.handle_right = new_co + direction * h_len
+                            p.handle_left_type = 'ALIGNED'
+                            p.handle_right_type = 'ALIGNED'
+                        else:
+                            w = p.co[3]
+                            p.co = new_co.to_4d()
+                            p.co[3] = w
+
+        return {'FINISHED'}
+
+class LOOPTOOLSPLUS_OT_curve_radius(Operator, CurveLoopToolsBase):
+    bl_idname = "looptools_plus.curve_radius"
+    bl_label = "Uniform Size"
+    bl_description = "Set radius of selected points to the average radius"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    mode: EnumProperty(
+        name="Mode",
+        items=(("average", "Average", "Average radius of selection"), 
+               ("set", "Set", "Set to specific value")),
+        default='average'
+    )
+    radius: FloatProperty(name="Radius", default=1.0, min=0.0)
+
+    def execute(self, context):
+        for obj in context.selected_objects:
+            if obj.type != 'CURVE': continue
+            for spline in obj.data.splines:
+                points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
+                segments = self.get_segments(spline)
+                if not segments: continue
+                
+                # First pass: Calculate average if needed
+                target_radius = self.radius
+                if self.mode == 'average':
+                    total = 0.0
+                    count = 0
+                    for seg in segments:
+                        for idx in seg:
+                            total += points[idx].radius
+                            count += 1
+                    if count > 0:
+                        target_radius = total / count
+                
+                # Second pass: Apply
+                for seg in segments:
+                    for idx in seg:
+                        points[idx].radius = target_radius
+                        
+        return {'FINISHED'}
+
 # ########################################
 # ##### Plane Calculation Helper #########
 # ########################################
@@ -937,6 +1025,8 @@ class LOOPTOOLSPLUS_OT_uv_flatten(Operator, UVLoopToolsBase):
 def register():
     bpy.utils.register_class(LOOPTOOLSPLUS_OT_curve_relax)
     bpy.utils.register_class(LOOPTOOLSPLUS_OT_curve_space)
+    bpy.utils.register_class(LOOPTOOLSPLUS_OT_curve_linear)
+    bpy.utils.register_class(LOOPTOOLSPLUS_OT_curve_radius)
     bpy.utils.register_class(LOOPTOOLSPLUS_OT_curve_flatten)
     bpy.utils.register_class(LOOPTOOLSPLUS_OT_curve_circle)
     bpy.utils.register_class(LOOPTOOLSPLUS_OT_uv_relax)
@@ -951,5 +1041,7 @@ def unregister():
     bpy.utils.unregister_class(LOOPTOOLSPLUS_OT_uv_relax)
     bpy.utils.unregister_class(LOOPTOOLSPLUS_OT_curve_circle)
     bpy.utils.unregister_class(LOOPTOOLSPLUS_OT_curve_flatten)
+    bpy.utils.unregister_class(LOOPTOOLSPLUS_OT_curve_radius)
+    bpy.utils.unregister_class(LOOPTOOLSPLUS_OT_curve_linear)
     bpy.utils.unregister_class(LOOPTOOLSPLUS_OT_curve_space)
     bpy.utils.unregister_class(LOOPTOOLSPLUS_OT_curve_relax)
