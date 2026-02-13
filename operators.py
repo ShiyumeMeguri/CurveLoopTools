@@ -4,6 +4,7 @@ import mathutils
 import math
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty
 from bpy.types import Operator
+import contextlib
 
 
 # ########################################
@@ -280,6 +281,17 @@ class CurveLoopToolsBase:
                     segments[0] = curr + segments[0]
                 else: segments.append(curr)
         return segments
+    
+    @contextlib.contextmanager
+    def maintain_curve_mode(self, context):
+        is_edit_mode = (context.object.mode == 'EDIT')
+        if is_edit_mode:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        try:
+            yield
+        finally:
+            if is_edit_mode:
+                bpy.ops.object.mode_set(mode='EDIT')
 
 # ########################################
 # ##### Curve Operators ##################
@@ -314,42 +326,45 @@ class LOOPTOOLSPLUS_OT_curve_relax(Operator, CurveLoopToolsBase):
                 num_points = len(points)
                 segments = self.get_segments(spline)
                 if not segments: continue
-                for seg in segments:
-                    if len(seg) < 3: continue 
-                    attrs = []
-                    if self.relax_position: attrs.append('position')
-                    if self.relax_tilt: attrs.append('tilt')
-                    if self.relax_radius: attrs.append('radius')
-                    if not attrs: continue
-                    for _ in range(self.iterations):
-                        pts_co = [points[i].co.to_3d() for i in seg]
-                        seg_data = []
-                        for i in seg:
-                            d, p = [], points[i]
-                            if self.relax_position: d.extend([p.co.x, p.co.y, p.co.z])
-                            if self.relax_tilt: d.append(p.tilt)
-                            if self.relax_radius: d.append(p.radius)
-                            seg_data.append(d)
-                        circ = (spline.use_cyclic_u and len(seg) == num_points)
-                        ki, pi = relax_calculate_knots(len(seg_data), circ)
-                        tk, tp = relax_calculate_t(pts_co, ki, pi, self.regular)
-                        spls = []
-                        for kp in range(len(ki)):
-                            kd, t = [seg_data[k] for k in ki[kp]], tk[kp]
-                            s = calculate_cubic_splines(t, kd) if self.interpolation == 'cubic' else calculate_linear_splines(t, kd)
-                            spls.append(s)
-                        moves = relax_calculate_verts(self.interpolation, tk, ki, tp, pi, spls)
-                        for l_idx, n_vals in moves:
-                            p = points[seg[l_idx]]; offset = 0
-                            if self.relax_position:
-                                o_co = p.co.to_3d(); n_co = (o_co + mathutils.Vector(n_vals[0:3])) / 2
-                                if spline.type == 'BEZIER':
-                                    delta = n_co - o_co; p.handle_left += delta; p.handle_right += delta; p.co = n_co
-                                else:
-                                    w = p.co[3]; p.co = n_co.to_4d(); p.co[3] = w
-                                offset += 3
-                            if self.relax_tilt: p.tilt = (p.tilt + n_vals[offset]) / 2; offset += 1
-                            if self.relax_radius: p.radius = (p.radius + n_vals[offset]) / 2; offset += 1
+                
+                with self.maintain_curve_mode(context):
+                    for seg in segments:
+                        if len(seg) < 3: continue 
+                        attrs = []
+                        if self.relax_position: attrs.append('position')
+                        if self.relax_tilt: attrs.append('tilt')
+                        if self.relax_radius: attrs.append('radius')
+                        if not attrs: continue
+                        
+                        for _ in range(self.iterations):
+                            pts_co = [points[i].co.to_3d() for i in seg]
+                            seg_data = []
+                            for i in seg:
+                                d, p = [], points[i]
+                                if self.relax_position: d.extend([p.co.x, p.co.y, p.co.z])
+                                if self.relax_tilt: d.append(p.tilt)
+                                if self.relax_radius: d.append(p.radius)
+                                seg_data.append(d)
+                            circ = (spline.use_cyclic_u and len(seg) == num_points)
+                            ki, pi = relax_calculate_knots(len(seg_data), circ)
+                            tk, tp = relax_calculate_t(pts_co, ki, pi, self.regular)
+                            spls = []
+                            for kp in range(len(ki)):
+                                kd, t = [seg_data[k] for k in ki[kp]], tk[kp]
+                                s = calculate_cubic_splines(t, kd) if self.interpolation == 'cubic' else calculate_linear_splines(t, kd)
+                                spls.append(s)
+                            moves = relax_calculate_verts(self.interpolation, tk, ki, tp, pi, spls)
+                            for l_idx, n_vals in moves:
+                                p = points[seg[l_idx]]; offset = 0
+                                if self.relax_position:
+                                    o_co = p.co.to_3d(); n_co = (o_co + mathutils.Vector(n_vals[0:3])) / 2
+                                    if spline.type == 'BEZIER':
+                                        delta = n_co - o_co; p.handle_left += delta; p.handle_right += delta; p.co = n_co
+                                    else:
+                                        w = p.co[3]; p.co = n_co.to_4d(); p.co[3] = w
+                                    offset += 3
+                                if self.relax_tilt: p.tilt = (p.tilt + n_vals[offset]) / 2; offset += 1
+                                if self.relax_radius: p.radius = (p.radius + n_vals[offset]) / 2; offset += 1
         return {'FINISHED'}
 
 class LOOPTOOLSPLUS_OT_curve_space(Operator, CurveLoopToolsBase):
@@ -369,29 +384,31 @@ class LOOPTOOLSPLUS_OT_curve_space(Operator, CurveLoopToolsBase):
                 num_points = len(points)
                 segments = self.get_segments(spline)
                 if not segments: continue
-                for seg in segments:
-                    if len(seg) < 2: continue
-                    pts_co = [points[i].co.to_3d() for i in seg]
-                    seg_data = []
-                    for i in seg:
-                        p = points[i]; seg_data.append([p.co.x, p.co.y, p.co.z, p.tilt, p.radius])
-                    tk, tp = space_calculate_t(pts_co)
-                    spls = calculate_cubic_splines(tk, seg_data) if self.interpolation == 'cubic' else calculate_linear_splines(tk, seg_data)
-                    moves = space_calculate_verts(self.interpolation, tk, tp, spls)
-                    infl = self.influence / 100.0
-                    for l_idx, n_vals in moves:
-                        p = points[seg[l_idx]]
-                        o_co = p.co.to_3d(); t_co = mathutils.Vector(n_vals[0:3])
-                        if self.lock_x: t_co.x = o_co.x
-                        if self.lock_y: t_co.y = o_co.y
-                        if self.lock_z: t_co.z = o_co.z
-                        f_co = o_co.lerp(t_co, infl)
-                        if spline.type == 'BEZIER':
-                            delta = f_co - o_co; p.handle_left += delta; p.handle_right += delta; p.co = f_co
-                        else:
-                            w = p.co[3]; p.co = f_co.to_4d(); p.co[3] = w
-                        p.tilt = p.tilt + (n_vals[3] - p.tilt) * infl
-                        p.radius = p.radius + (n_vals[4] - p.radius) * infl
+                
+                with self.maintain_curve_mode(context):
+                    for seg in segments:
+                        if len(seg) < 2: continue
+                        pts_co = [points[i].co.to_3d() for i in seg]
+                        seg_data = []
+                        for i in seg:
+                            p = points[i]; seg_data.append([p.co.x, p.co.y, p.co.z, p.tilt, p.radius])
+                        tk, tp = space_calculate_t(pts_co)
+                        spls = calculate_cubic_splines(tk, seg_data) if self.interpolation == 'cubic' else calculate_linear_splines(tk, seg_data)
+                        moves = space_calculate_verts(self.interpolation, tk, tp, spls)
+                        infl = self.influence / 100.0
+                        for l_idx, n_vals in moves:
+                            p = points[seg[l_idx]]
+                            o_co = p.co.to_3d(); t_co = mathutils.Vector(n_vals[0:3])
+                            if self.lock_x: t_co.x = o_co.x
+                            if self.lock_y: t_co.y = o_co.y
+                            if self.lock_z: t_co.z = o_co.z
+                            f_co = o_co.lerp(t_co, infl)
+                            if spline.type == 'BEZIER':
+                                delta = f_co - o_co; p.handle_left += delta; p.handle_right += delta; p.co = f_co
+                            else:
+                                w = p.co[3]; p.co = f_co.to_4d(); p.co[3] = w
+                            p.tilt = p.tilt + (n_vals[3] - p.tilt) * infl
+                            p.radius = p.radius + (n_vals[4] - p.radius) * infl
         return {'FINISHED'}
 
 class LOOPTOOLSPLUS_OT_curve_linear(Operator, CurveLoopToolsBase):
@@ -463,22 +480,23 @@ class LOOPTOOLSPLUS_OT_curve_radius(Operator, CurveLoopToolsBase):
                 segments = self.get_segments(spline)
                 if not segments: continue
                 
-                # First pass: Calculate average if needed
-                target_radius = self.radius
-                if self.mode == 'average':
-                    total = 0.0
-                    count = 0
+                with self.maintain_curve_mode(context):
+                    # First pass: Calculate average if needed
+                    target_radius = self.radius
+                    if self.mode == 'average':
+                        total = 0.0
+                        count = 0
+                        for seg in segments:
+                            for idx in seg:
+                                total += points[idx].radius
+                                count += 1
+                        if count > 0:
+                            target_radius = total / count
+                    
+                    # Second pass: Apply
                     for seg in segments:
                         for idx in seg:
-                            total += points[idx].radius
-                            count += 1
-                    if count > 0:
-                        target_radius = total / count
-                
-                # Second pass: Apply
-                for seg in segments:
-                    for idx in seg:
-                        points[idx].radius = target_radius
+                            points[idx].radius = target_radius
                         
         return {'FINISHED'}
 
@@ -614,41 +632,42 @@ class LOOPTOOLSPLUS_OT_curve_flatten(Operator, CurveLoopToolsBase):
                 points = spline.bezier_points if spline.type == 'BEZIER' else spline.points
                 segments = self.get_segments(spline)
                 if not segments: continue
-                
+
                 infl = self.influence / 100.0
-                for seg in segments:
-                    if len(seg) < 3: continue # Need 3 points for a plane, though 2 could work for line-flattening, user wants plane.
-                    pts = [points[idx].co.to_3d() for idx in seg]
+                with self.maintain_curve_mode(context):
+                    for seg in segments:
+                        if len(seg) < 3: continue # Need 3 points for a plane, though 2 could work for line-flattening, user wants plane.
+                        pts = [points[idx].co.to_3d() for idx in seg]
                     
-                    # 1. Determine Plane (Center and Normal)
-                    if self.alignment in {'best', 'view'}:
-                        center, normal = calculate_plane(pts, self.alignment, view_mat)
-                    else: # X, Y, Z
-                        center = sum(pts, mathutils.Vector()) / len(pts)
-                        normal = mathutils.Vector((0, 0, 0))
-                        if self.alignment == 'x': normal.x = 1
-                        elif self.alignment == 'y': normal.y = 1
-                        elif self.alignment == 'z': normal.z = 1
-                    
-                    # 2. Project
-                    for idx in seg:
-                        p = points[idx]
-                        orig_co = p.co.to_3d()
+                        # 1. Determine Plane (Center and Normal)
+                        if self.alignment in {'best', 'view'}:
+                            center, normal = calculate_plane(pts, self.alignment, view_mat)
+                        else: # X, Y, Z
+                            center = sum(pts, mathutils.Vector()) / len(pts)
+                            normal = mathutils.Vector((0, 0, 0))
+                            if self.alignment == 'x': normal.x = 1
+                            elif self.alignment == 'y': normal.y = 1
+                            elif self.alignment == 'z': normal.z = 1
                         
-                        # Project onto plane defined by center and normal
-                        # proj = p - n * dot(p - center, n)
-                        proj = orig_co - normal * (orig_co - center).dot(normal)
-                        
-                        target = orig_co.lerp(proj, infl)
-                        if spline.type == 'BEZIER':
-                            delta = target - orig_co
-                            p.handle_left += delta
-                            p.handle_right += delta
-                            p.co = target
-                        else:
-                            w = p.co[3]
-                            p.co = target.to_4d()
-                            p.co[3] = w
+                        # 2. Project
+                        for idx in seg:
+                            p = points[idx]
+                            orig_co = p.co.to_3d()
+                            
+                            # Project onto plane defined by center and normal
+                            # proj = p - n * dot(p - center, n)
+                            proj = orig_co - normal * (orig_co - center).dot(normal)
+                            
+                            target = orig_co.lerp(proj, infl)
+                            if spline.type == 'BEZIER':
+                                delta = target - orig_co
+                                p.handle_left += delta
+                                p.handle_right += delta
+                                p.co = target
+                            else:
+                                w = p.co[3]
+                                p.co = target.to_4d()
+                                p.co[3] = w
         return {'FINISHED'}
 
 class LOOPTOOLSPLUS_OT_curve_circle(Operator, CurveLoopToolsBase):
@@ -682,75 +701,64 @@ class LOOPTOOLSPLUS_OT_curve_circle(Operator, CurveLoopToolsBase):
                 if not segments: continue
                 
                 infl = self.influence / 100.0
-                for seg in segments:
-                    if len(seg) < 3: continue
-                    pts = [points[idx].co.to_3d() for idx in seg]
-                    center = sum(pts, mathutils.Vector()) / len(seg)
-                    
-                    # 1. Determine Normal/Plane
-                    if self.alignment == 'best':
-                        normal = mathutils.Vector()
-                        for i in range(len(seg) - 2):
-                            v1 = pts[i+1] - pts[i]; v2 = pts[i+2] - pts[i]
-                            normal += v1.cross(v2)
-                        if normal.length < 1e-7: normal = mathutils.Vector((0, 0, 1))
-                        else: normal.normalize()
-                    elif self.alignment == 'view':
-                        normal = view_mat.to_3x3().inverted().transposed() @ mathutils.Vector((0, 0, 1))
-                    else:
-                        normal = mathutils.Vector((0,0,0))
-                        if self.alignment == 'x': normal.x = 1
-                        elif self.alignment == 'y': normal.y = 1
-                        elif self.alignment == 'z': normal.z = 1
-                    
-                    # 2. Project and Radius
-                    proj_pts = []
-                    radius = 0.0
-                    for p_co in pts:
-                        proj = p_co - normal * (p_co - center).dot(normal)
-                        proj_pts.append(proj)
-                        radius += (proj - center).length
-                    radius /= len(seg)
-                    if radius < 1e-7: continue
-                    
-                    # 3. Axes
-                    axis_x = (proj_pts[0] - center).normalized()
-                    axis_y = normal.cross(axis_x).normalized()
-                    
-                    cyclic = (spline.use_cyclic_u and len(seg) == num_points)
-                    
-                    if self.regular:
-                        angles = [math.atan2((p - center).dot(axis_y), (p - center).dot(axis_x)) for p in proj_pts]
-                        for i in range(1, len(angles)):
-                            while angles[i] - angles[i-1] > math.pi: angles[i] -= 2*math.pi
-                            while angles[i] - angles[i-1] < -math.pi: angles[i] += 2*math.pi
+                with self.maintain_curve_mode(context):
+                    for seg in segments:
+                        if len(seg) < 3: continue
+                        pts = [points[idx].co.to_3d() for idx in seg]
+                        center = sum(pts, mathutils.Vector()) / len(seg)
                         
-                        start_angle = angles[0]
-                        end_angle = angles[-1]
+                        # 1. Determine Normal/Plane
+                        if self.alignment == 'best':
+                            normal = mathutils.Vector()
+                            for i in range(len(seg) - 2):
+                                v1 = pts[i+1] - pts[i]; v2 = pts[i+2] - pts[i]
+                                normal += v1.cross(v2)
+                            if normal.length < 1e-7: normal = mathutils.Vector((0, 0, 1))
+                            else: normal.normalize()
+                        elif self.alignment == 'view':
+                            normal = view_mat.to_3x3().inverted().transposed() @ mathutils.Vector((0, 0, 1))
+                        else:
+                            normal = mathutils.Vector((0,0,0))
+                            if self.alignment == 'x': normal.x = 1
+                            elif self.alignment == 'y': normal.y = 1
+                            elif self.alignment == 'z': normal.z = 1
                         
-                        for i, idx in enumerate(seg):
-                            if cyclic or self.fit == 'circle':
-                                # Loop over full 360. If open, overlap endpoints by default or distribute N?
-                                # To overlap: 1.0 / (len - 1), to gap: 1.0 / len
-                                # User says "perfectly closed", so overlap endpoints if open.
-                                div = len(seg) if cyclic else (len(seg) - 1)
-                                angle = start_angle + i * (2 * math.pi / div)
-                            else:
-                                angle = start_angle + (end_angle - start_angle) * (i / (len(seg) - 1))
+                        # 2. Project and Radius
+                        proj_pts = []
+                        radius = 0.0
+                        for p_co in pts:
+                            proj = p_co - normal * (p_co - center).dot(normal)
+                            proj_pts.append(proj)
+                            radius += (proj - center).length
+                        radius /= len(seg)
+                        if radius < 1e-7: continue
+                        
+                        # 3. Axes
+                        axis_x = (proj_pts[0] - center).normalized()
+                        axis_y = normal.cross(axis_x).normalized()
+                        
+                        cyclic = (spline.use_cyclic_u and len(seg) == num_points)
+                        
+                        if self.regular:
+                            angles = [math.atan2((p - center).dot(axis_y), (p - center).dot(axis_x)) for p in proj_pts]
+                            for i in range(1, len(angles)):
+                                while angles[i] - angles[i-1] > math.pi: angles[i] -= 2*math.pi
+                                while angles[i] - angles[i-1] < -math.pi: angles[i] += 2*math.pi
                             
-                            target = center + axis_x * math.cos(angle) * radius + axis_y * math.sin(angle) * radius
-                            orig_co = points[idx].co.to_3d()
-                            res = orig_co.lerp(target, infl)
-                            p = points[idx]
-                            if spline.type == 'BEZIER':
-                                delta = res - orig_co; p.handle_left += delta; p.handle_right += delta; p.co = res
-                            else:
-                                w = p.co[3]; p.co = res.to_4d(); p.co[3] = w
-                    else:
-                        for i, idx in enumerate(seg):
-                            vec = proj_pts[i] - center
-                            if vec.length > 1e-7:
-                                target = center + vec.normalized() * radius
+                            start_angle = angles[0]
+                            end_angle = angles[-1]
+                            
+                            for i, idx in enumerate(seg):
+                                if cyclic or self.fit == 'circle':
+                                    # Loop over full 360. If open, overlap endpoints by default or distribute N?
+                                    # To overlap: 1.0 / (len - 1), to gap: 1.0 / len
+                                    # User says "perfectly closed", so overlap endpoints if open.
+                                    div = len(seg) if cyclic else (len(seg) - 1)
+                                    angle = start_angle + i * (2 * math.pi / div)
+                                else:
+                                    angle = start_angle + (end_angle - start_angle) * (i / (len(seg) - 1))
+                                
+                                target = center + axis_x * math.cos(angle) * radius + axis_y * math.sin(angle) * radius
                                 orig_co = points[idx].co.to_3d()
                                 res = orig_co.lerp(target, infl)
                                 p = points[idx]
@@ -758,6 +766,18 @@ class LOOPTOOLSPLUS_OT_curve_circle(Operator, CurveLoopToolsBase):
                                     delta = res - orig_co; p.handle_left += delta; p.handle_right += delta; p.co = res
                                 else:
                                     w = p.co[3]; p.co = res.to_4d(); p.co[3] = w
+                        else:
+                            for i, idx in enumerate(seg):
+                                vec = proj_pts[i] - center
+                                if vec.length > 1e-7:
+                                    target = center + vec.normalized() * radius
+                                    orig_co = points[idx].co.to_3d()
+                                    res = orig_co.lerp(target, infl)
+                                    p = points[idx]
+                                    if spline.type == 'BEZIER':
+                                        delta = res - orig_co; p.handle_left += delta; p.handle_right += delta; p.co = res
+                                    else:
+                                        w = p.co[3]; p.co = res.to_4d(); p.co[3] = w
         return {'FINISHED'}
 
 # ########################################

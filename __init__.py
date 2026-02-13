@@ -58,7 +58,7 @@ class LOOPTOOLSPLUS_MT_menu(bpy.types.Menu):
             layout.operator("looptools_plus.curve_linear", text="Linear")
             layout.operator("looptools_plus.curve_radius", text="Uniform Size")
             
-        elif is_mesh and context.space_data and context.space_data.type == 'IMAGE_EDITOR':
+        elif context.space_data and context.space_data.type == 'IMAGE_EDITOR':
             layout.operator("looptools_plus.uv_circle", text="Circle")
             layout.operator("looptools_plus.uv_flatten", text="Flatten")
             layout.separator()
